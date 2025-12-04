@@ -8,6 +8,7 @@
 #include <random>
 #include <algorithm>
 
+
 class CIFAR10Dataset {
 public:
     std::vector<std::vector<float>> images;
@@ -16,6 +17,12 @@ public:
     int num_images = 0;
 
     CIFAR10Dataset() {}
+
+    void clear() {
+        images.clear();
+        labels.clear();
+        num_images = 0;
+    }
 
     bool load_batch(const std::string &path) {
         std::ifstream file(path, std::ios::binary);
@@ -42,8 +49,29 @@ public:
         }
 
         file.close();
-        num_images = images.size();
+        num_images = static_cast<int>(images.size());
         return true;
+    }
+
+    bool load_train(const std::string &base_dir) {
+        clear();
+        bool ok = true;
+        for (int i = 1; i <= 5; ++i) {
+            std::string path = base_dir + "/data_batch_" + std::to_string(i) + ".bin";
+            if (!load_batch(path)) {
+                ok = false;
+            }
+        }
+        num_images = static_cast<int>(images.size());
+        return ok;
+    }
+
+    bool load_test(const std::string &base_dir) {
+        clear();
+        std::string path = base_dir + "/test_batch.bin";
+        bool ok = load_batch(path);
+        num_images = static_cast<int>(images.size());
+        return ok;
     }
 
     void shuffle_data() {
