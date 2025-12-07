@@ -1,3 +1,1 @@
-// TODO: implement optimized CUDA autoencoder (v2) here.
-
-
+// TODO: implement optimized CUDA autoencoder (v2).

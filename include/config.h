@@ -10,4 +10,3 @@ constexpr int CIFAR_NUM_CLASSES = 10;
 
 constexpr int ENCODER_FEATURE_DIM = 8192;
 
-

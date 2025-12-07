@@ -1,3 +1,1 @@
-// TODO: implement basic CUDA autoencoder here.
-
-
+// TODO: implement basic CUDA autoencoder.
