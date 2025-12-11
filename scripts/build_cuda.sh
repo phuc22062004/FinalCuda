@@ -7,29 +7,31 @@ BUILD_DIR="${PROJECT_ROOT}/build_cuda"
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
-echo "Building CUDA versions..."
+echo "========================================" 
+echo "   Building CUDA Autoencoder Versions"
+echo "========================================"
+echo ""
 
-nvcc -std=c++17 -O2 \
-    "${PROJECT_ROOT}/src/main.cpp" \
-    "${PROJECT_ROOT}/src/data/cifar10_loader.cpp" \
+# Build CUDA Basic version
+echo "Building CUDA Basic version..."
+nvcc -std=c++17 -O3 \
+    "${PROJECT_ROOT}/src/main_cuda_basic.cpp" \
     "${PROJECT_ROOT}/src/cuda/autoencoder_basic.cu" \
     -I"${PROJECT_ROOT}/include" \
+    -I"${PROJECT_ROOT}/src/data" \
     -o autoencoder_cuda_basic
 
-nvcc -std=c++17 -O2 \
-    "${PROJECT_ROOT}/src/main.cpp" \
-    "${PROJECT_ROOT}/src/data/cifar10_loader.cpp" \
-    "${PROJECT_ROOT}/src/cuda/autoencoder_opt_v1.cu" \
-    -I"${PROJECT_ROOT}/include" \
-    -o autoencoder_cuda_opt_v1
+if [ $? -eq 0 ]; then
+    echo "✓ CUDA Basic version built successfully!"
+else
+    echo "✗ Failed to build CUDA Basic version"
+    exit 1
+fi
 
-nvcc -std=c++17 -O2 \
-    "${PROJECT_ROOT}/src/main.cpp" \
-    "${PROJECT_ROOT}/src/data/cifar10_loader.cpp" \
-    "${PROJECT_ROOT}/src/cuda/autoencoder_opt_v2.cu" \
-    -I"${PROJECT_ROOT}/include" \
-    -o autoencoder_cuda_opt_v2
-
-echo "CUDA binaries created in: ${BUILD_DIR}"
+echo ""
+echo "========================================"
+echo "Build complete!"
+echo "Executable: ${BUILD_DIR}/autoencoder_cuda_basic"
+echo "========================================"
 
 

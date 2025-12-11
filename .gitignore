@@ -1,0 +1,28 @@
+# Build directories
+build_cpu/
+build_cuda/
+
+# Binary files
+*.bin
+*.o
+*.out
+
+# Model weights
+autoencoder_weights.bin
+model*.bin
+*_model.bin
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
