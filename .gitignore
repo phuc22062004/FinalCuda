@@ -7,6 +7,9 @@ build_cuda/
 *.o
 *.out
 
+# Data
+cifar-10-binary/cifar-10-binary.tar.gz
+
 
 
 # IDE
