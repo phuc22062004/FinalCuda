@@ -7,10 +7,7 @@ build_cuda/
 *.o
 *.out
 
-# Model weights
-autoencoder_weights.bin
-model*.bin
-*_model.bin
+
 
 # IDE
 .vscode/

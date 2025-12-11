@@ -10,7 +10,7 @@ mkdir -p "${BUILD_DIR}"
 
 echo "Building CUDA basic version..."
 nvcc -std=c++17 -O3 \
-    "${PROJECT_ROOT}/src/main_cuda.cpp" \
+    "${PROJECT_ROOT}/src/main_cuda_basic.cpp" \
     "${PROJECT_ROOT}/src/cuda/autoencoder_basic.cu" \
     -I"${PROJECT_ROOT}/include" \
     -I"${PROJECT_ROOT}/src/data" \
