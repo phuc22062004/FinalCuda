@@ -327,16 +327,17 @@ __global__ void sgd_update_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float g = grad[idx];
+        // Check for NaN/Inf first
         if (isnan(g) || isinf(g)) {
             g = 0.0f;
         } else {
-            if (g > 5.0f) g = 5.0f;
-            if (g < -5.0f) g = -5.0f;
+            // Clip gradient to prevent explosion (stricter bound)
+            if (g > 1.0f) g = 1.0f;
+            if (g < -1.0f) g = -1.0f;
         }
         weight[idx] -= learning_rate * g;
     }
 }
-
 
 // ============================================================================
 // AUTOENCODER CLASS IMPLEMENTATION - MEMORY OPTIMIZED
@@ -483,7 +484,7 @@ AutoencoderCUDA::~AutoencoderCUDA() {
 }
 
 void AutoencoderCUDA::forward() {
-    dim3 block(16, 16);
+    dim3 block(1, 16, 16);
     
     // Conv1: 3 -> 256, 32x32 (pad=1)
     dim3 grid1(256, (32 + 15) / 16, (32 + 15) / 16);
@@ -546,8 +547,13 @@ void AutoencoderCUDA::forward() {
 }
 
 void AutoencoderCUDA::backward() {
-    dim3 block(16, 16);
+    dim3 block(1, 16, 16);
     int output_size = 3 * 32 * 32;
+    
+    // CRITICAL: Zero-initialize gradient buffers used with atomicAdd
+    // Without this, maxpool backward accumulates into garbage values
+    CUDA_CHECK(cudaMemset(d_grad_relu1, 0, 256 * 32 * 32 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_grad_relu2, 0, 128 * 16 * 16 * sizeof(float)));
     
     // Compute loss and gradient
     CUDA_CHECK(cudaMemset(d_loss, 0, sizeof(float)));
@@ -765,7 +771,7 @@ void AutoencoderCUDA::extract_features(const float* input_chw, float* output_fea
     CUDA_CHECK(cudaMemcpy(d_input, input_chw, 3 * 32 * 32 * sizeof(float), cudaMemcpyHostToDevice));
     
     // Run encoder only (up to pool2_out which is the bottleneck)
-    dim3 block(16, 16);
+    dim3 block(1, 16, 16);
     
     // Conv1
     dim3 grid1(256, (32 + 15) / 16, (32 + 15) / 16);
