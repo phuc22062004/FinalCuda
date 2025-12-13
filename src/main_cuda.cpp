@@ -22,7 +22,10 @@ int main(int argc, char** argv) {
     if (argc > 5) learning_rate = std::stof(argv[5]);
     if (argc > 6) max_train_images = std::stoi(argv[6]);
 
-    std::cout << "=== CUDA BASIC (Phase 2) ===\n";
+#ifndef VERSION_NAME
+    #define VERSION_NAME "CUDA BASIC"
+#endif
+    std::cout << "=== " << VERSION_NAME << " ===\n";
     std::cout << "CIFAR dir: " << cifar_dir << "\n";
     std::cout << "Weights:   " << model_path << "\n";
     std::cout << "Epochs:    " << epochs << "\n";
