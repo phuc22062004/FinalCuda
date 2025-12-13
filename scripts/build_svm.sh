@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -e
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="${PROJECT_ROOT}/build_svm"
+
+mkdir -p "${BUILD_DIR}"
+cd "${BUILD_DIR}"
+
+echo "Building SVM Feature Extraction Tools..."
+
+# Build CPU feature extractor
+echo "Building CPU feature extractor..."
+g++ -std=c++17 -O2 \
+    "${PROJECT_ROOT}/src/svm/extract_features_cpu.cpp" \
+    "${PROJECT_ROOT}/src/cpu/autoencoder_cpu.cpp" \
+    -I"${PROJECT_ROOT}/include" \
+    -I"${PROJECT_ROOT}/src/data" \
+    -o extract_features_cpu
+
+# Build CUDA feature extractor
+echo "Building CUDA feature extractor..."
+nvcc -std=c++17 -O2 -c \
+    "${PROJECT_ROOT}/src/cuda/autoencoder_basic.cu" \
+    -I"${PROJECT_ROOT}/include" \
+    -I"${PROJECT_ROOT}/src/data" \
+    -o autoencoder_basic_svm.o
+
+nvcc -std=c++17 -O2 -c \
+    "${PROJECT_ROOT}/src/svm/extract_features_cuda.cpp" \
+    -I"${PROJECT_ROOT}/include" \
+    -I"${PROJECT_ROOT}/src/data" \
+    -o extract_features_cuda.o
+
+nvcc -std=c++17 -O2 \
+    extract_features_cuda.o autoencoder_basic_svm.o \
+    -o extract_features_cuda
+
+# Make Python script executable
+chmod +x "${PROJECT_ROOT}/src/svm/svm_train_test.py"
+
+echo "SVM tools built successfully in: ${BUILD_DIR}"
+echo ""
+echo "Available executables:"
+echo "  - extract_features_cpu:  Extract features using CPU-trained model"
+echo "  - extract_features_cuda: Extract features using CUDA-trained model"
+echo ""
+echo "Python script:"
+echo "  - ../src/svm/svm_train_test.py: Train and test SVM classifier"

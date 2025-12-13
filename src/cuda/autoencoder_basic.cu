@@ -805,3 +805,53 @@ float AutoencoderCUDA::get_loss() const {
     return last_loss; 
 }
 
+void AutoencoderCUDA::extract_features(const float* input_chw, float* output_features) {
+    // Copy input to device
+    CUDA_CHECK(cudaMemcpy(d_input, input_chw,
+                         CIFAR_IMAGE_CHANNELS*CIFAR_IMAGE_HEIGHT*CIFAR_IMAGE_WIDTH*sizeof(float),
+                         cudaMemcpyHostToDevice));
+
+    dim3 threads(1, 16, 16);
+    
+    // Run encoder only (same as forward pass but stop at bottleneck)
+    
+    // Conv1: (3, 32, 32) -> (256, 32, 32)
+    dim3 blocks1(256, 2, 2);
+    conv2d_kernel<<<blocks1, threads>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
+                                        3, 32, 32, 256, 32, 32, 3, 1);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // ReLU1
+    relu_kernel<<<(256*32*32 + 255)/256, 256>>>(d_conv1_out, d_relu1_out, 256*32*32);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // MaxPool1: (256, 32, 32) -> (256, 16, 16)
+    dim3 blocks_pool1(256, 1, 1);
+    dim3 threads_pool1(1, 16, 16);
+    maxpool_kernel<<<blocks_pool1, threads_pool1>>>(d_relu1_out, d_pool1_out, 256, 32, 32);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // Conv2: (256, 16, 16) -> (128, 16, 16)
+    dim3 blocks2(128, 1, 1);
+    conv2d_kernel<<<blocks2, threads>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
+                                        256, 16, 16, 128, 16, 16, 3, 1);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // ReLU2
+    relu_kernel<<<(128*16*16 + 255)/256, 256>>>(d_conv2_out, d_relu2_out, 128*16*16);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // MaxPool2: (128, 16, 16) -> (128, 8, 8) - THIS IS THE BOTTLENECK/FEATURES
+    dim3 blocks_pool2(128, 1, 1);
+    dim3 threads_pool2(1, 8, 8);
+    maxpool_kernel<<<blocks_pool2, threads_pool2>>>(d_relu2_out, d_pool2_out, 128, 16, 16);
+    CUDA_CHECK(cudaGetLastError());
+    
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    // Copy features from device to host
+    // d_pool2_out contains 128*8*8 = 8192 features
+    CUDA_CHECK(cudaMemcpy(output_features, d_pool2_out,
+                         128*8*8*sizeof(float),
+                         cudaMemcpyDeviceToHost));
+}

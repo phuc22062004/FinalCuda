@@ -13,6 +13,9 @@ public:
     bool save_weights(const std::string& filepath) const;
     bool load_weights(const std::string& filepath);
     float get_loss() const;
+    
+    // Extract features from encoder (bottleneck layer: 128*8*8 = 8192 features)
+    void extract_features(const float* input_chw, float* output_features);
 
 private:
     void forward();

@@ -1,0 +1,91 @@
+=========================================
+CIFAR-10 Autoencoder + SVM Pipeline
+=========================================
+
+Using CUDA version...
+
+Step 1: Extracting features from trained autoencoder...
+=========================================
+=== CUDA Feature Extraction for SVM ===
+CIFAR-10 dir: ./cifar-10-binary/cifar-10-batches-bin
+Weights:      autoencoder_cuda_basic_weights.bin
+Output train: train_features_cuda.libsvm
+Output test:  test_features_cuda.libsvm
+
+Loaded train images: 50000
+Loaded test images:  10000
+
+Loaded weights from: autoencoder_cuda_basic_weights.bin
+Loaded autoencoder weights
+
+Extracting training features...
+  Processed 0/50000
+  Processed 5000/50000
+  Processed 10000/50000
+  Processed 15000/50000
+  Processed 20000/50000
+  Processed 25000/50000
+  Processed 30000/50000
+  Processed 35000/50000
+  Processed 40000/50000
+  Processed 45000/50000
+  Completed 50000/50000
+Feature dimension: 8192
+
+Extracting test features...
+  Processed 0/10000
+  Processed 1000/10000
+  Processed 2000/10000
+  Processed 3000/10000
+  Processed 4000/10000
+  Processed 5000/10000
+  Processed 6000/10000
+  Processed 7000/10000
+  Processed 8000/10000
+  Processed 9000/10000
+  Completed 10000/10000
+
+Feature extraction time: 123s
+
+Saving features...
+Saved 50000 samples to train_features_cuda.libsvm
+Saved 10000 samples to test_features_cuda.libsvm
+
+Feature extraction complete!
+Train features: train_features_cuda.libsvm
+Test features:  test_features_cuda.libsvm
+
+Features extracted successfully!
+  Train: train_features_cuda.libsvm
+  Test:  test_features_cuda.libsvm
+
+Step 2: Training and testing SVM classifier...
+=========================================
+Using GPU for SVM training (ThunderSVM C++)
+==========================================
+ThunderSVM C++ - SVM Training & Testing
+==========================================
+Training file:    train_features_cuda.libsvm
+Test file:        test_features_cuda.libsvm
+Model file:       svm_model.txt
+Prediction file:  predictions.txt
+C parameter:      10.0
+Gamma:            auto
+GPU enabled:      1
+==========================================
+
+Step 1: Training SVM...
+Command: thundersvm-train -s 0 -t 2 -c 10.0 -u 1 train_features_cuda.libsvm svm_model.txt
+
+[36m2025-12-13 12:59:41,653 INFO dataset.cpp:21 : loading dataset from file "train_features_cuda.libsvm"
+[0m[36m2025-12-13 13:00:09,576 INFO dataset.cpp:99 : #instances = 50000, #features = 8192
+[0m[36m2025-12-13 13:00:09,578 INFO thundersvm-train.cpp:34 : training C-SVC
+[0m[36m2025-12-13 13:00:09,578 INFO thundersvm-train.cpp:35 : C = 10
+[0m[33m2025-12-13 13:00:09,578 WARNING thundersvm-train.cpp:76 : using default gamma=0.00012207
+[0m[31m2025-12-13 13:00:09,638 FATAL thundersvm-train.cpp:82 : Check failed: [error == cudaSuccess]  no CUDA-capable device is detected
+[0m[33m2025-12-13 13:00:09,638 WARNING thundersvm-train.cpp:82 : Aborting application. Reason: Fatal log at [/home/senyamiku/LTSS/FinalCuda/thundersvm/src/thundersvm/thundersvm-train.cpp:82]
+[0mscripts/svm_train_test_cpp.sh: line 91: 46000 Aborted                 (core dumped) $TRAIN_CMD
+
+real	0m55.892s
+user	4m48.308s
+sys	0m19.364s

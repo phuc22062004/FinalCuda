@@ -1,0 +1,8 @@
+=========================================
+CIFAR-10 Autoencoder + SVM Pipeline
+=========================================
+
+Using CUDA version...
+
+Step 1: Extracting features from trained autoencoder...
+=========================================
