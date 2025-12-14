@@ -166,11 +166,7 @@ int main(int argc, char** argv) {
     // ========================================================================
     std::cout << "PASS 1: Extracting train features + computing statistics...\n";
     auto pass1_start = std::chrono::high_resolution_clock::now();
-    
-    long long extract_time_us = 0;
-    long long welford_time_us = 0;
-    long long cache_time_us = 0;
-    
+    long long extract_us = 0, welford_us = 0, cache_us = 0;
     {
         std::ofstream cache_file(cache_path, std::ios::binary);
         if (!cache_file.is_open()) {
@@ -184,36 +180,32 @@ int main(int argc, char** argv) {
             }
             
             float* image_chw = train_dataset.images[i].data();
-            
-            // TIME: Feature extraction
             auto t1 = std::chrono::high_resolution_clock::now();
             std::vector<float> features = extract_features_from_encoder(ae, image_chw);
             auto t2 = std::chrono::high_resolution_clock::now();
-            extract_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-            
+            extract_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
             int label = train_dataset.labels[i];
             
-            // TIME: Update scaler statistics
+            // Update scaler statistics
             auto t3 = std::chrono::high_resolution_clock::now();
             scaler.update(features.data());
             auto t4 = std::chrono::high_resolution_clock::now();
-            welford_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
+            welford_us += std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
             
-            // TIME: Cache features to disk
+            // Cache features to disk
             auto t5 = std::chrono::high_resolution_clock::now();
             write_cache_sample(cache_file, label, features.data(), D);
             auto t6 = std::chrono::high_resolution_clock::now();
-            cache_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count();
+            cache_us += std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count();
         }
         std::cout << "  Completed " << train_dataset.num_images << "/" << train_dataset.num_images << "\n";
     }
     
     // Finalize scaler (compute std from accumulated M2)
-    auto finalize_start = std::chrono::high_resolution_clock::now();
+    auto fin_start = std::chrono::high_resolution_clock::now();
     scaler.finalize();
-    auto finalize_end = std::chrono::high_resolution_clock::now();
-    long long finalize_time_us = std::chrono::duration_cast<std::chrono::microseconds>(finalize_end - finalize_start).count();
-    
+    auto fin_end = std::chrono::high_resolution_clock::now();
+    long long finalize_us = std::chrono::duration_cast<std::chrono::microseconds>(fin_end - fin_start).count();
     std::cout << "  Statistics computed (mean/std for " << D << " dims)\n";
     
     // Save scaler for test set
@@ -222,27 +214,16 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "  Scaler saved to: " << scaler_path << "\n";
-    
     auto pass1_end = std::chrono::high_resolution_clock::now();
     auto pass1_total = std::chrono::duration_cast<std::chrono::seconds>(pass1_end - pass1_start);
-    
-    std::cout << "  PASS 1 Breakdown:\n";
-    std::cout << "    - GPU extraction:     " << (extract_time_us / 1000000) << "s\n";
-    std::cout << "    - Welford update:     " << (welford_time_us / 1000000) << "s\n";
-    std::cout << "    - Cache write:        " << (cache_time_us / 1000000) << "s\n";
-    std::cout << "    - Finalize stats:     " << (finalize_time_us / 1000000) << "s\n";
-    std::cout << "  PASS 1 Total: " << pass1_total.count() << "s\n\n";
+    std::cout << "  PASS 1 Times: Extract=" << (extract_us/1000000) << "s, Welford=" << (welford_us/1000000) << "s, Cache=" << (cache_us/1000000) << "s, Finalize=" << (finalize_us/1000000) << "s, Total=" << pass1_total.count() << "s\n\n";
     
     // ========================================================================
     // PASS 2: Read cache + scale + write LibSVM
     // ========================================================================
     std::cout << "PASS 2: Scaling and writing train features...\n";
     auto pass2_start = std::chrono::high_resolution_clock::now();
-    
-    long long cache_read_time_us = 0;
-    long long scaling_time_us = 0;
-    long long libsvm_write_time_us = 0;
-    
+    long long read_us = 0, write_us = 0;
     {
         std::ifstream cache_file(cache_path, std::ios::binary);
         std::ofstream libsvm_file(output_train);
@@ -257,20 +238,16 @@ int main(int argc, char** argv) {
         int count = 0;
         
         while (true) {
-            // TIME: Read from cache
             auto t1 = std::chrono::high_resolution_clock::now();
-            bool read_ok = read_cache_sample(cache_file, label, feat.data(), D);
+            bool ok = read_cache_sample(cache_file, label, feat.data(), D);
             auto t2 = std::chrono::high_resolution_clock::now();
-            cache_read_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+            if (!ok) break;
+            read_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
             
-            if (!read_ok) break;
-            
-            // TIME: Scale (transform is inline, so measure the whole libsvm write which includes scaling)
             auto t3 = std::chrono::high_resolution_clock::now();
             write_one_libsvm(libsvm_file, label, feat.data(), scaler);
             auto t4 = std::chrono::high_resolution_clock::now();
-            libsvm_write_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
-            
+            write_us += std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
             count++;
             if (count % 5000 == 0) {
                 std::cout << "  Written " << count << " samples\n";
@@ -278,24 +255,16 @@ int main(int argc, char** argv) {
         }
         std::cout << "  Completed: " << count << " samples to " << output_train << "\n";
     }
-    
     auto pass2_end = std::chrono::high_resolution_clock::now();
     auto pass2_total = std::chrono::duration_cast<std::chrono::seconds>(pass2_end - pass2_start);
-    
-    std::cout << "  PASS 2 Breakdown:\n";
-    std::cout << "    - Cache read:         " << (cache_read_time_us / 1000000) << "s\n";
-    std::cout << "    - Scale + LibSVM:     " << (libsvm_write_time_us / 1000000) << "s\n";
-    std::cout << "  PASS 2 Total: " << pass2_total.count() << "s\n\n";
+    std::cout << "  PASS 2 Times: CacheRead=" << (read_us/1000000) << "s, ScaleWrite=" << (write_us/1000000) << "s, Total=" << pass2_total.count() << "s\n\n";
     
     // ========================================================================
     // TEST SET: Extract + scale immediately (no cache needed)
     // ========================================================================
     std::cout << "Extracting and scaling test features...\n";
     auto test_start = std::chrono::high_resolution_clock::now();
-    
-    long long test_extract_time_us = 0;
-    long long test_write_time_us = 0;
-    
+    long long test_extract_us = 0, test_write_us = 0;
     {
         std::ofstream libsvm_file(output_test);
         if (!libsvm_file.is_open()) {
@@ -309,59 +278,33 @@ int main(int argc, char** argv) {
             }
             
             float* image_chw = test_dataset.images[i].data();
-            
-            // TIME: Feature extraction
             auto t1 = std::chrono::high_resolution_clock::now();
             std::vector<float> features = extract_features_from_encoder(ae, image_chw);
             auto t2 = std::chrono::high_resolution_clock::now();
-            test_extract_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-            
+            test_extract_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
             int label = test_dataset.labels[i];
             
-            // TIME: Scale and write directly
+            // Scale and write directly
             auto t3 = std::chrono::high_resolution_clock::now();
             write_one_libsvm(libsvm_file, label, features.data(), scaler);
             auto t4 = std::chrono::high_resolution_clock::now();
-            test_write_time_us += std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
+            test_write_us += std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
         }
         std::cout << "  Completed: " << test_dataset.num_images << " samples to " << output_test << "\n";
     }
-    
     auto test_end = std::chrono::high_resolution_clock::now();
     auto test_total = std::chrono::duration_cast<std::chrono::seconds>(test_end - test_start);
-    
-    std::cout << "  TEST Breakdown:\n";
-    std::cout << "    - GPU extraction:     " << (test_extract_time_us / 1000000) << "s\n";
-    std::cout << "    - Scale + LibSVM:     " << (test_write_time_us / 1000000) << "s\n";
-    std::cout << "  TEST Total: " << test_total.count() << "s\n\n";
+    std::cout << "  TEST Times: Extract=" << (test_extract_us/1000000) << "s, ScaleWrite=" << (test_write_us/1000000) << "s, Total=" << test_total.count() << "s\n\n";
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
     
-    std::cout << "=============================================================\n";
-    std::cout << "               PERFORMANCE SUMMARY\n";
-    std::cout << "=============================================================\n";
-    std::cout << "PASS 1 (Train extraction + statistics):\n";
-    std::cout << "  - GPU extraction:     " << (extract_time_us / 1000000) << "s\n";
-    std::cout << "  - Welford update:     " << (welford_time_us / 1000000) << "s\n";
-    std::cout << "  - Cache write:        " << (cache_time_us / 1000000) << "s\n";
-    std::cout << "  - Finalize stats:     " << (finalize_time_us / 1000000) << "s\n\n";
-    
-    std::cout << "PASS 2 (Train scaling + LibSVM):\n";
-    std::cout << "  - Cache read:         " << (cache_read_time_us / 1000000) << "s\n";
-    std::cout << "  - Scale + LibSVM:     " << (libsvm_write_time_us / 1000000) << "s\n\n";
-    
-    std::cout << "TEST (Extract + scale + LibSVM):\n";
-    std::cout << "  - GPU extraction:     " << (test_extract_time_us / 1000000) << "s\n";
-    std::cout << "  - Scale + LibSVM:     " << (test_write_time_us / 1000000) << "s\n\n";
-    
-    long long total_gpu_us = extract_time_us + test_extract_time_us;
-    long long total_io_us = cache_time_us + cache_read_time_us + libsvm_write_time_us + test_write_time_us;
-    
-    std::cout << "🔥 TOTAL GPU EXTRACTION:  " << (total_gpu_us / 1000000) << "s\n";
-    std::cout << "📊 TOTAL I/O + SCALING:   " << (total_io_us / 1000000) << "s\n";
-    std::cout << "⏱️  TOTAL TIME:            " << duration.count() << "s\n";
-    std::cout << "=============================================================\n\n";
+    std::cout << "====================================================\n";
+    std::cout << "SUMMARY:\n";
+    std::cout << "  Total GPU Extraction: " << ((extract_us + test_extract_us)/1000000) << "s\n";
+    std::cout << "  Total I/O & Scaling:  " << ((welford_us + cache_us + read_us + write_us + test_write_us)/1000000) << "s\n";
+    std::cout << "  Total Time:           " << duration.count() << "s\n";
+    std::cout << "====================================================\n\n";
 
     std::cout << "=== Feature extraction complete! ===\n";
     std::cout << "Train features (scaled): " << output_train << "\n";
