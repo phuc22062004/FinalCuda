@@ -2,6 +2,8 @@
 #include <string>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 class AutoencoderCUDA {
 public:
     AutoencoderCUDA();
