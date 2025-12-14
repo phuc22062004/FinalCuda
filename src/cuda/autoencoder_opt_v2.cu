@@ -1067,3 +1067,47 @@ void AutoencoderCUDA::extract_features(const float* input_chw, float* output_fea
     // Copy features to host
     CUDA_CHECK(cudaMemcpy(output_features, d_pool2_out, 128 * 8 * 8 * sizeof(float), cudaMemcpyDeviceToHost));
 }
+
+// ============================================================================
+// ASYNC FEATURE EXTRACTION (for batched processing, SAFE: training unaffected)
+// ============================================================================
+void AutoencoderCUDA::extract_features_async(const float* input_chw, float* output_features, cudaStream_t stream) {
+    // Copy input to device (ASYNC)
+    CUDA_CHECK(cudaMemcpyAsync(d_input, input_chw, 3 * 32 * 32 * sizeof(float),
+                              cudaMemcpyHostToDevice, stream));
+    
+    // Run encoder with stream
+    dim3 block(1, 16, 16);
+    
+    // Conv1
+    dim3 grid1(256, (32 + 15) / 16, (32 + 15) / 16);
+    conv2d_kernel<<<grid1, block, 0, stream>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
+                                                3, 32, 32, 256, 32, 32, 3, 1);
+    
+    // ReLU1 - IN-PLACE
+    int size1 = 256 * 32 * 32;
+    relu_inplace_kernel<<<(size1 + 255) / 256, 256, 0, stream>>>(d_conv1_out, size1);
+    
+    // Pool1
+    dim3 grid_pool1(256, (16 + 15) / 16, (16 + 15) / 16);
+    maxpool_kernel<<<grid_pool1, block, 0, stream>>>(d_relu1_out, d_pool1_out, 256, 32, 32);
+    
+    // Conv2
+    dim3 grid2(128, (16 + 15) / 16, (16 + 15) / 16);
+    conv2d_kernel<<<grid2, block, 0, stream>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
+                                                256, 16, 16, 128, 16, 16, 3, 1);
+    
+    // ReLU2 - IN-PLACE
+    int size2 = 128 * 16 * 16;
+    relu_inplace_kernel<<<(size2 + 255) / 256, 256, 0, stream>>>(d_conv2_out, size2);
+    
+    // Pool2 - BOTTLENECK
+    dim3 grid_pool2(128, (8 + 15) / 16, (8 + 15) / 16);
+    maxpool_kernel<<<grid_pool2, block, 0, stream>>>(d_relu2_out, d_pool2_out, 128, 16, 16);
+    
+    CUDA_CHECK(cudaGetLastError());
+    
+    // Copy features to host (ASYNC)
+    CUDA_CHECK(cudaMemcpyAsync(output_features, d_pool2_out, 128 * 8 * 8 * sizeof(float),
+                              cudaMemcpyDeviceToHost, stream));
+}

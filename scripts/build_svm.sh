@@ -56,19 +56,19 @@ nvcc -std=c++17 -O2 \
 
 # Build CUDA OPT_V2 feature extractor
 echo "Building CUDA OPT_V2 feature extractor..."
-nvcc -std=c++17 -O3 -use_fast_math -c \
+nvcc -std=c++17 -O2 -c \
     "${PROJECT_ROOT}/src/cuda/autoencoder_opt_v2.cu" \
     -I"${PROJECT_ROOT}/include" \
     -I"${PROJECT_ROOT}/src/data" \
     -o autoencoder_opt_v2_svm.o
 
-nvcc -std=c++17 -O3 -use_fast_math -c \
+nvcc -std=c++17 -O2 -c \
     "${PROJECT_ROOT}/src/svm/extract_features_cuda.cpp" \
     -I"${PROJECT_ROOT}/include" \
     -I"${PROJECT_ROOT}/src/data" \
     -o extract_features_cuda_opt_v2.o
 
-nvcc -std=c++17 -O3 -use_fast_math \
+nvcc -std=c++17 -O2  \
     extract_features_cuda_opt_v2.o autoencoder_opt_v2_svm.o \
     -o extract_features_cuda_opt_v2
 

@@ -855,3 +855,56 @@ void AutoencoderCUDA::extract_features(const float* input_chw, float* output_fea
                          128*8*8*sizeof(float),
                          cudaMemcpyDeviceToHost));
 }
+
+// ============================================================================
+// ASYNC FEATURE EXTRACTION (for batched processing, SAFE: training unaffected)
+// ============================================================================
+void AutoencoderCUDA::extract_features_async(const float* input_chw, float* output_features, cudaStream_t stream) {
+    // Copy input to device (ASYNC - requires pinned host memory)
+    CUDA_CHECK(cudaMemcpyAsync(d_input, input_chw,
+                              CIFAR_IMAGE_CHANNELS*CIFAR_IMAGE_HEIGHT*CIFAR_IMAGE_WIDTH*sizeof(float),
+                              cudaMemcpyHostToDevice, stream));
+
+    dim3 threads(1, 16, 16);
+    
+    // Run encoder with stream
+    
+    // Conv1: (3, 32, 32) -> (256, 32, 32)
+    dim3 blocks1(256, 2, 2);
+    conv2d_kernel<<<blocks1, threads, 0, stream>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
+                                                    3, 32, 32, 256, 32, 32, 3, 1);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // ReLU1
+    relu_kernel<<<(256*32*32 + 255)/256, 256, 0, stream>>>(d_conv1_out, d_relu1_out, 256*32*32);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // MaxPool1: (256, 32, 32) -> (256, 16, 16)
+    dim3 blocks_pool1(256, 1, 1);
+    dim3 threads_pool1(1, 16, 16);
+    maxpool_kernel<<<blocks_pool1, threads_pool1, 0, stream>>>(d_relu1_out, d_pool1_out, 256, 32, 32);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // Conv2: (256, 16, 16) -> (128, 16, 16)
+    dim3 blocks2(128, 1, 1);
+    conv2d_kernel<<<blocks2, threads, 0, stream>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
+                                                    256, 16, 16, 128, 16, 16, 3, 1);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // ReLU2
+    relu_kernel<<<(128*16*16 + 255)/256, 256, 0, stream>>>(d_conv2_out, d_relu2_out, 128*16*16);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // MaxPool2: (128, 16, 16) -> (128, 8, 8) - BOTTLENECK
+    dim3 blocks_pool2(128, 1, 1);
+    dim3 threads_pool2(1, 8, 8);
+    maxpool_kernel<<<blocks_pool2, threads_pool2, 0, stream>>>(d_relu2_out, d_pool2_out, 128, 16, 16);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // NO SYNC HERE - caller will sync the stream
+    
+    // Copy features to host (ASYNC - requires pinned output)
+    CUDA_CHECK(cudaMemcpyAsync(output_features, d_pool2_out,
+                              128*8*8*sizeof(float),
+                              cudaMemcpyDeviceToHost, stream));
+}

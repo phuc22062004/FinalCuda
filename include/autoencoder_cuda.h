@@ -16,6 +16,13 @@ public:
     
     // Extract features from encoder (bottleneck layer: 128*8*8 = 8192 features)
     void extract_features(const float* input_chw, float* output_features);
+    
+    // ASYNC version for batched extraction (SAFE: doesn't affect training)
+    // - input_chw: pinned host memory
+    // - output_features: pinned host memory
+    // - stream: CUDA stream for async operations
+    // - NO sync inside this function
+    void extract_features_async(const float* input_chw, float* output_features, cudaStream_t stream);
 
 private:
     void forward();
