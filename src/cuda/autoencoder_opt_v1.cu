@@ -868,12 +868,11 @@ void AutoencoderCUDA::extract_features(const float* input_chw, float* output_fea
     CUDA_CHECK(cudaMemcpy(d_input, input_chw, 3 * 32 * 32 * sizeof(float), cudaMemcpyHostToDevice));
     
     // Run encoder only (up to pool2_out which is the bottleneck)
-    dim3 block(1, 16, 16);
+    dim3 block(16, 16, 1);
     
-    // Conv1
+    // Conv1 - USE CONSTANT MEMORY KERNEL!
     dim3 grid1(256, (32 + 15) / 16, (32 + 15) / 16);
-    conv2d_kernel<<<grid1, block>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
-                                     3, 32, 32, 256, 32, 32, 3, 1);
+    conv1_kernel_const<<<grid1, block>>>(d_input, d_conv1_out);
     
     // ReLU1 - IN-PLACE
     int size1 = 256 * 32 * 32;
@@ -911,12 +910,11 @@ void AutoencoderCUDA::extract_features_async(const float* input_chw, float* outp
                               cudaMemcpyHostToDevice, stream));
     
     // Run encoder with stream
-    dim3 block(1, 16, 16);
+    dim3 block(16, 16, 1);
     
-    // Conv1
+    // Conv1 - USE CONSTANT MEMORY KERNEL!
     dim3 grid1(256, (32 + 15) / 16, (32 + 15) / 16);
-    conv2d_kernel<<<grid1, block, 0, stream>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
-                                                3, 32, 32, 256, 32, 32, 3, 1);
+    conv1_kernel_const<<<grid1, block, 0, stream>>>(d_input, d_conv1_out);
     
     // ReLU1 - IN-PLACE
     int size1 = 256 * 32 * 32;
