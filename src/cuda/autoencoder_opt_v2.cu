@@ -5,10 +5,10 @@
 //   2. Constant memory for conv1 & conv5
 //   3. In-place ReLU, gradient buffer reuse
 // V2 NEW optimizations:
-//   ✅ Kernel Fusion: Conv+Bias+ReLU fused (eliminates extra global mem writes)
-//   ✅ Vectorized float4: SGD update, MSE loss (4x bandwidth efficiency)
-//   ✅ Tuned block dims: Different sizes per layer (32x32→32x8, 8x8→8x8)
-//   ✅ Specialized 3x3 conv: Hardcoded kernel size, fully unrolled
+//   Kernel Fusion: Conv+Bias+ReLU fused (eliminates extra global mem writes)
+//   Vectorized float4: SGD update, MSE loss (4x bandwidth efficiency)
+//   Tuned block dims: Different sizes per layer (32x32→32x8, 8x8→8x8)
+//   Specialized 3x3 conv: Hardcoded kernel size, fully unrolled
 
 #include "config.h"
 #include "autoencoder_cuda.h"
