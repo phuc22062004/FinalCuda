@@ -9,12 +9,12 @@ cd "${BUILD_DIR}"
 
 echo "Building CPU version..."
 g++ -std=c++17 -O2 \
-    "${PROJECT_ROOT}/src/main.cpp" \
+    "${PROJECT_ROOT}/src/main_cpu.cpp" \
     "${PROJECT_ROOT}/src/cpu/autoencoder_cpu.cpp" \
     -I"${PROJECT_ROOT}/include" \
     -I"${PROJECT_ROOT}/src/data" \
     -o autoencoder_cpu
-
+    
 echo "CPU binary created at: ${BUILD_DIR}/autoencoder_cpu"
 
 
