@@ -1,38 +1,90 @@
 // Extract features using CUDA-trained autoencoder for SVM training
+// WITH Z-SCORE SCALING for better SVM performance
 #include <iostream>
 #include <fstream>
 #include <vector>
 #include <string>
 #include <chrono>
+#include <cmath>
 
 #include "cifar10_loader.h"
 #include "config.h"
 #include "autoencoder_cuda.h"
 
-void save_features_libsvm_format(
-    const std::string& filepath,
-    const std::vector<std::vector<float>>& features,
-    const std::vector<int>& labels
-) {
-    std::ofstream file(filepath);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open file: " << filepath << "\n";
-        return;
-    }
-
-    for (size_t i = 0; i < features.size(); i++) {
-        // Write label
-        file << labels[i];
-        
-        // Write features in LibSVM format: label index:value index:value ...
-        for (size_t j = 0; j < features[i].size(); j++) {
-            file << " " << (j + 1) << ":" << features[i][j];
+// ============================================================================
+// Z-Score Scaler using Welford's online algorithm
+// Computes mean and std for each feature dimension efficiently
+// ============================================================================
+struct ZScaler {
+    int D;                          // Feature dimension (8192)
+    long long n = 0;                // Number of samples seen
+    std::vector<double> mean, m2;   // Mean and M2 (for variance calculation)
+    std::vector<float> stdv;        // Standard deviation per dimension
+    
+    explicit ZScaler(int dim) : D(dim), mean(dim, 0.0), m2(dim, 0.0), stdv(dim, 1.0f) {}
+    
+    // Update statistics with new sample (online)
+    void update(const float* x) {
+        n++;
+        for (int d = 0; d < D; d++) {
+            double xd = x[d];
+            double delta = xd - mean[d];
+            mean[d] += delta / (double)n;
+            double delta2 = xd - mean[d];
+            m2[d] += delta * delta2;
         }
-        file << "\n";
     }
     
-    file.close();
-    std::cout << "Saved " << features.size() << " samples to " << filepath << "\n";
+    // Finalize: compute std from m2
+    void finalize(float eps = 1e-6f) {
+        for (int d = 0; d < D; d++) {
+            double var = (n > 1) ? (m2[d] / (double)(n - 1)) : 0.0;
+            double s = std::sqrt(var);
+            if (s < eps) s = eps;  // Prevent division by zero
+            stdv[d] = (float)s;
+        }
+    }
+    
+    // Transform a single value using computed statistics
+    inline float transform(float x, int d) const {
+        return (x - (float)mean[d]) / stdv[d];
+    }
+};
+
+// Save scaler to binary file
+static bool save_scaler(const std::string& path, const ZScaler& sc) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    f.write((char*)&sc.D, sizeof(int));
+    f.write((char*)&sc.n, sizeof(long long));
+    f.write((char*)sc.mean.data(), sc.D * sizeof(double));
+    f.write((char*)sc.stdv.data(), sc.D * sizeof(float));
+    return true;
+}
+
+// Load scaler from binary file
+static bool load_scaler(const std::string& path, ZScaler& sc) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    int D = 0; 
+    long long n = 0;
+    f.read((char*)&D, sizeof(int));
+    f.read((char*)&n, sizeof(long long));
+    if (D != sc.D) return false;
+    sc.n = n;
+    f.read((char*)sc.mean.data(), sc.D * sizeof(double));
+    f.read((char*)sc.stdv.data(), sc.D * sizeof(float));
+    return true;
+}
+
+// Write one sample to LibSVM format with scaling
+static void write_one_libsvm(std::ofstream& out, int label, const float* feat, const ZScaler& sc) {
+    out << label;
+    for (int j = 0; j < sc.D; j++) {
+        float v = sc.transform(feat[j], j);
+        out << " " << (j + 1) << ":" << v;
+    }
+    out << "\n";
 }
 
 // Extract features from encoder (after pool2: 128x8x8 = 8192 features)
@@ -42,22 +94,44 @@ std::vector<float> extract_features_from_encoder(AutoencoderCUDA& ae, const floa
     return features;
 }
 
+// ============================================================================
+// 2-Pass Pipeline Helper: Write float* to binary cache
+// ============================================================================
+static bool write_cache_sample(std::ofstream& cache, int label, const float* feat, int D) {
+    cache.write((char*)&label, sizeof(int));
+    cache.write((char*)feat, D * sizeof(float));
+    return cache.good();
+}
+
+// ============================================================================
+// 2-Pass Pipeline Helper: Read one sample from binary cache
+// ============================================================================
+static bool read_cache_sample(std::ifstream& cache, int& label, float* feat, int D) {
+    cache.read((char*)&label, sizeof(int));
+    if (!cache.good()) return false;
+    cache.read((char*)feat, D * sizeof(float));
+    return cache.good();
+}
+
 int main(int argc, char** argv) {
     std::string cifar_dir = "../cifar-10-binary/cifar-10-batches-bin";
     std::string weights_path = "autoencoder_cuda_basic_weights.bin";
     std::string output_train = "train_features_cuda.libsvm";
     std::string output_test = "test_features_cuda.libsvm";
+    std::string scaler_path = "scaler_z.bin";
+    std::string cache_path = "train_cache.bin";
 
     if (argc > 1) cifar_dir = argv[1];
     if (argc > 2) weights_path = argv[2];
     if (argc > 3) output_train = argv[3];
     if (argc > 4) output_test = argv[4];
 
-    std::cout << "=== CUDA Feature Extraction for SVM ===\n";
+    std::cout << "=== CUDA Feature Extraction for SVM (With Z-Score Scaling) ===\n";
     std::cout << "CIFAR-10 dir: " << cifar_dir << "\n";
     std::cout << "Weights:      " << weights_path << "\n";
     std::cout << "Output train: " << output_train << "\n";
-    std::cout << "Output test:  " << output_test << "\n\n";
+    std::cout << "Output test:  " << output_test << "\n";
+    std::cout << "Scaler:       " << scaler_path << "\n\n";
 
     // Load datasets
     CIFAR10Dataset train_dataset;
@@ -83,56 +157,116 @@ int main(int argc, char** argv) {
     std::cout << "Loaded autoencoder weights\n\n";
 
     auto start_time = std::chrono::high_resolution_clock::now();
-
-    // Extract training features
-    std::cout << "Extracting training features...\n";
-    std::vector<std::vector<float>> train_features;
-    std::vector<int> train_labels;
     
-    for (int i = 0; i < train_dataset.num_images; i++) {
-        if (i % 5000 == 0) {
-            std::cout << "  Processed " << i << "/" << train_dataset.num_images << "\n";
+    const int D = 8192;  // Feature dimension
+    ZScaler scaler(D);
+    
+    // ========================================================================
+    // PASS 1: Extract train features + compute statistics + cache
+    // ========================================================================
+    std::cout << "PASS 1: Extracting train features + computing statistics...\n";
+    {
+        std::ofstream cache_file(cache_path, std::ios::binary);
+        if (!cache_file.is_open()) {
+            std::cerr << "Failed to open cache file: " << cache_path << "\n";
+            return 1;
         }
         
-        float* image_chw = train_dataset.images[i].data();
-        std::vector<float> features = extract_features_from_encoder(ae, image_chw);
-        
-        train_features.push_back(features);
-        train_labels.push_back(train_dataset.labels[i]);
+        for (int i = 0; i < train_dataset.num_images; i++) {
+            if (i % 5000 == 0) {
+                std::cout << "  Processed " << i << "/" << train_dataset.num_images << "\n";
+            }
+            
+            float* image_chw = train_dataset.images[i].data();
+            std::vector<float> features = extract_features_from_encoder(ae, image_chw);
+            int label = train_dataset.labels[i];
+            
+            // Update scaler statistics
+            scaler.update(features.data());
+            
+            // Cache features to disk
+            write_cache_sample(cache_file, label, features.data(), D);
+        }
+        std::cout << "  Completed " << train_dataset.num_images << "/" << train_dataset.num_images << "\n";
     }
-    std::cout << "  Completed " << train_dataset.num_images << "/" << train_dataset.num_images << "\n";
-    std::cout << "Feature dimension: " << train_features[0].size() << "\n\n";
-
-    // Extract test features
-    std::cout << "Extracting test features...\n";
-    std::vector<std::vector<float>> test_features;
-    std::vector<int> test_labels;
     
-    for (int i = 0; i < test_dataset.num_images; i++) {
-        if (i % 1000 == 0) {
-            std::cout << "  Processed " << i << "/" << test_dataset.num_images << "\n";
+    // Finalize scaler (compute std from accumulated M2)
+    scaler.finalize();
+    std::cout << "  Statistics computed (mean/std for " << D << " dims)\n";
+    
+    // Save scaler for test set
+    if (!save_scaler(scaler_path, scaler)) {
+        std::cerr << "Failed to save scaler\n";
+        return 1;
+    }
+    std::cout << "  Scaler saved to: " << scaler_path << "\n\n";
+    
+    // ========================================================================
+    // PASS 2: Read cache + scale + write LibSVM
+    // ========================================================================
+    std::cout << "PASS 2: Scaling and writing train features...\n";
+    {
+        std::ifstream cache_file(cache_path, std::ios::binary);
+        std::ofstream libsvm_file(output_train);
+        
+        if (!cache_file.is_open() || !libsvm_file.is_open()) {
+            std::cerr << "Failed to open files\n";
+            return 1;
         }
         
-        float* image_chw = test_dataset.images[i].data();
-        std::vector<float> features = extract_features_from_encoder(ae, image_chw);
+        std::vector<float> feat(D);
+        int label;
+        int count = 0;
         
-        test_features.push_back(features);
-        test_labels.push_back(test_dataset.labels[i]);
+        while (read_cache_sample(cache_file, label, feat.data(), D)) {
+            write_one_libsvm(libsvm_file, label, feat.data(), scaler);
+            count++;
+            if (count % 5000 == 0) {
+                std::cout << "  Written " << count << " samples\n";
+            }
+        }
+        std::cout << "  Completed: " << count << " samples to " << output_train << "\n\n";
     }
-    std::cout << "  Completed " << test_dataset.num_images << "/" << test_dataset.num_images << "\n\n";
+    
+    // ========================================================================
+    // TEST SET: Extract + scale immediately (no cache needed)
+    // ========================================================================
+    std::cout << "Extracting and scaling test features...\n";
+    {
+        std::ofstream libsvm_file(output_test);
+        if (!libsvm_file.is_open()) {
+            std::cerr << "Failed to open test output\n";
+            return 1;
+        }
+        
+        for (int i = 0; i < test_dataset.num_images; i++) {
+            if (i % 2000 == 0) {
+                std::cout << "  Processed " << i << "/" << test_dataset.num_images << "\n";
+            }
+            
+            float* image_chw = test_dataset.images[i].data();
+            std::vector<float> features = extract_features_from_encoder(ae, image_chw);
+            int label = test_dataset.labels[i];
+            
+            // Scale and write directly
+            write_one_libsvm(libsvm_file, label, features.data(), scaler);
+        }
+        std::cout << "  Completed: " << test_dataset.num_images << " samples to " << output_test << "\n\n";
+    }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-    std::cout << "Feature extraction time: " << duration.count() << "s\n\n";
+    std::cout << "Total time: " << duration.count() << "s\n\n";
 
-    // Save in LibSVM format
-    std::cout << "Saving features...\n";
-    save_features_libsvm_format(output_train, train_features, train_labels);
-    save_features_libsvm_format(output_test, test_features, test_labels);
-
-    std::cout << "\nFeature extraction complete!\n";
-    std::cout << "Train features: " << output_train << "\n";
-    std::cout << "Test features:  " << output_test << "\n";
+    std::cout << "=== Feature extraction complete! ===\n";
+    std::cout << "Train features (scaled): " << output_train << "\n";
+    std::cout << "Test features (scaled):  " << output_test << "\n";
+    std::cout << "Scaler saved to:         " << scaler_path << "\n";
+    std::cout << "\nScaling statistics:\n";
+    std::cout << "  Samples:  " << scaler.n << "\n";
+    std::cout << "  Features: " << D << "\n";
+    std::cout << "  Example mean[0]:   " << scaler.mean[0] << "\n";
+    std::cout << "  Example stddev[0]: " << scaler.stdv[0] << "\n";
 
     return 0;
 }

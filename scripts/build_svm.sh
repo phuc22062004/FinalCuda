@@ -54,15 +54,29 @@ nvcc -std=c++17 -O2 \
     extract_features_cuda_opt_v1.o autoencoder_opt_v1_svm.o \
     -o extract_features_cuda_opt_v1
 
-# Make Python script executable
-chmod +x "${PROJECT_ROOT}/src/svm/svm_train_test.py"
+# Build CUDA OPT_V2 feature extractor
+echo "Building CUDA OPT_V2 feature extractor..."
+nvcc -std=c++17 -O3 -use_fast_math -c \
+    "${PROJECT_ROOT}/src/cuda/autoencoder_opt_v2.cu" \
+    -I"${PROJECT_ROOT}/include" \
+    -I"${PROJECT_ROOT}/src/data" \
+    -o autoencoder_opt_v2_svm.o
 
-echo "SVM tools built successfully in: ${BUILD_DIR}"
+nvcc -std=c++17 -O3 -use_fast_math -c \
+    "${PROJECT_ROOT}/src/svm/extract_features_cuda.cpp" \
+    -I"${PROJECT_ROOT}/include" \
+    -I"${PROJECT_ROOT}/src/data" \
+    -o extract_features_cuda_opt_v2.o
+
+nvcc -std=c++17 -O3 -use_fast_math \
+    extract_features_cuda_opt_v2.o autoencoder_opt_v2_svm.o \
+    -o extract_features_cuda_opt_v2
+
 echo ""
-echo "Available executables:"
-echo "  - extract_features_cpu:        Extract features using CPU-trained model"
-echo "  - extract_features_cuda:       Extract features using CUDA basic model"
-echo "  - extract_features_cuda_opt_v1: Extract features using CUDA OPT_V1 model"
-echo ""
-echo "Python script:"
-echo "  - ../src/svm/svm_train_test.py: Train and test SVM classifier"
+echo "SVM feature extractors built successfully!"
+echo "  - extract_features_cpu"
+echo "  - extract_features_cuda (basic)"
+echo "  - extract_features_cuda_opt_v1"
+echo "  - extract_features_cuda_opt_v2"
+
+
