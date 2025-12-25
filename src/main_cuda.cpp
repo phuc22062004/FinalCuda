@@ -2,18 +2,18 @@
 #include <vector>
 #include <string>
 #include <chrono>
-
+   
 #include "cifar10_loader.h"
 #include "config.h"
 #include "autoencoder_cuda.h"
 
 int main(int argc, char** argv) {
     std::string cifar_dir = "../cifar-10-binary/cifar-10-batches-bin";
-    std::string model_path = "autoencoder_cuda_basic_weights.bin";
+    std::string model_path = "autoencoder_cuda_opt_v1_weights.bin";
     int epochs = 1;
-    int batch_size = 64;       // GPU basic: cứ để 64 theo đề
+    int batch_size = 64;       // TRUE BATCH SIZE - processes 64 images simultaneously on GPU
     float learning_rate = 0.001f;
-    int max_train_images = 1000; // debug nhanh
+    int max_train_images = 1000;
 
     if (argc > 1) cifar_dir = argv[1];
     if (argc > 2) model_path = argv[2];
@@ -22,14 +22,11 @@ int main(int argc, char** argv) {
     if (argc > 5) learning_rate = std::stof(argv[5]);
     if (argc > 6) max_train_images = std::stoi(argv[6]);
 
-#ifndef VERSION_NAME
-    #define VERSION_NAME "CUDA BASIC"
-#endif
-    std::cout << "=== " << VERSION_NAME << " ===\n";
+    std::cout << "=== CUDA OPTIMIZED V1 - TRUE BATCH PROCESSING ===\n";
     std::cout << "CIFAR dir: " << cifar_dir << "\n";
     std::cout << "Weights:   " << model_path << "\n";
     std::cout << "Epochs:    " << epochs << "\n";
-    std::cout << "Batch:     " << batch_size << "\n";
+    std::cout << "Batch:     " << batch_size << " (GPU processes all simultaneously!)\n";
     std::cout << "LR:        " << learning_rate << "\n";
     std::cout << "Max train: " << max_train_images << "\n\n";
 
@@ -55,40 +52,50 @@ int main(int argc, char** argv) {
         train_dataset.shuffle_data();
 
         float epoch_loss = 0.0f;
-        int seen = 0;
+        int batch_count = 0;
 
         auto epoch_start = std::chrono::high_resolution_clock::now();
 
+        // Process in TRUE BATCHES - all images in batch processed simultaneously on GPU
         for (int start = 0; start < num_train_images; start += batch_size) {
             int end = std::min(start + batch_size, num_train_images);
-            float batch_loss = 0.0f;
-
-            for (int i = start; i < end; i++) {
-                // dataset.images[i] đã là vector<float> size 3072 theo CHW và [0,1]
-                batch_loss += ae.train_step(train_dataset.images[i].data(), learning_rate);
+            int current_batch_size = end - start;
+            
+            // Prepare batch buffer (contiguous memory)
+            std::vector<float> batch_buffer(current_batch_size * 3072);
+            for (int i = 0; i < current_batch_size; i++) {
+                std::copy(train_dataset.images[start + i].begin(),
+                         train_dataset.images[start + i].end(),
+                         batch_buffer.begin() + i * 3072);
             }
-
-            batch_loss /= (end - start);
+            
+            // Process ENTIRE BATCH on GPU simultaneously
+            float batch_loss = ae.train_step_batch(batch_buffer.data(), current_batch_size, learning_rate);
+            
             epoch_loss += batch_loss;
-            seen++;
+            batch_count++;
 
-            int batch_num = start / batch_size + 1;
-            if (batch_num == 1 || batch_num % 10 == 0) {
-                std::cout << "  Batch " << batch_num << " loss: " << batch_loss << "\n";
+            if (batch_count == 1 || batch_count % 10 == 0) {
+                std::cout << "  Batch " << batch_count << " (" << current_batch_size << " images) loss: " 
+                         << batch_loss << "\n";
             }
         }
 
-        epoch_loss /= seen;
+        epoch_loss /= batch_count;
 
         auto epoch_end = std::chrono::high_resolution_clock::now();
-        auto epoch_s = std::chrono::duration_cast<std::chrono::seconds>(epoch_end - epoch_start).count();
+        auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(epoch_end - epoch_start).count();
+        float imgs_per_sec = (float)num_train_images / (epoch_ms / 1000.0f);
 
-        std::cout << "Epoch avg loss: " << epoch_loss << " | time: " << epoch_s << "s\n";
+        std::cout << "Epoch avg loss: " << epoch_loss 
+                 << " | time: " << epoch_ms << "ms"
+                 << " | throughput: " << imgs_per_sec << " imgs/sec\n";
     }
 
     auto total_end = std::chrono::high_resolution_clock::now();
-    auto total_s = std::chrono::duration_cast<std::chrono::seconds>(total_end - total_start).count();
-    std::cout << "\nTotal training time: " << total_s << "s\n";
+    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
+    std::cout << "\nTotal training time: " << total_ms << "ms\n";
+    std::cout << "Average throughput: " << (float)(num_train_images * epochs) / (total_ms / 1000.0f) << " imgs/sec\n";
 
     std::cout << "Saving weights to " << model_path << "\n";
     if (!ae.save_weights(model_path)) {

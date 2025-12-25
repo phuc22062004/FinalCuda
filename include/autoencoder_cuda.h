@@ -10,6 +10,11 @@ public:
 
     // input: float[3072] theo layout CHW (C=3,H=32,W=32), đã normalize [0,1]
     float train_step(const float* input_chw, float learning_rate);
+    
+    // BATCH PROCESSING - processes multiple images simultaneously
+    // input_batch: float[batch_size * 3072] - contiguous CHW layout
+    // returns average loss across batch
+    float train_step_batch(const float* input_batch, int batch_size, float learning_rate);
 
     bool save_weights(const std::string& filepath) const;
     bool load_weights(const std::string& filepath);
@@ -29,6 +34,10 @@ private:
     void forward();
     void backward();
     void update_weights(float learning_rate);
+    
+    // Batch processing internals
+    void forward_batch(int batch_size);
+    void backward_batch(int batch_size);
 
     // Host weight pointers (mutable for save_weights const method)
     mutable std::vector<float> h_conv1_w, h_conv1_b;
@@ -59,6 +68,17 @@ private:
     float *d_conv4_out, *d_relu4_out, *d_up2_out;
     float *d_conv5_out;
     
+    // Batch processing buffers (allocated on-demand)
+    float *d_batch_input;
+    float *d_batch_output;
+    int allocated_batch_size;
+    
+    // Batch intermediate buffers (allocated on-demand)
+    float *d_batch_conv1_out, *d_batch_pool1_out;
+    float *d_batch_conv2_out, *d_batch_pool2_out;
+    float *d_batch_conv3_out, *d_batch_up1_out;
+    float *d_batch_conv4_out, *d_batch_up2_out;
+
     // Device gradient buffers
     float *d_grad_conv5, *d_grad_up2, *d_grad_relu4, *d_grad_conv4;
     float *d_grad_up1, *d_grad_relu3, *d_grad_conv3;

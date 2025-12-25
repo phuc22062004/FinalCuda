@@ -603,7 +603,7 @@ __global__ void mse_loss_vec4(
 // AUTOENCODER CLASS IMPLEMENTATION - SPEED OPTIMIZED V2
 // ============================================================================
 
-AutoencoderCUDA::AutoencoderCUDA() : last_loss(0.0f) {
+AutoencoderCUDA::AutoencoderCUDA() : last_loss(0.0f), d_batch_input(nullptr), d_batch_output(nullptr), allocated_batch_size(0) {
     // Initialize weights on host
     h_conv1_w.resize(256 * 3 * 3 * 3);
     h_conv1_b.resize(256);
@@ -748,6 +748,10 @@ AutoencoderCUDA::~AutoencoderCUDA() {
     // Don't free reused pointers!
     
     cudaFree(d_loss);
+    
+    // Free batch buffers
+    if (d_batch_input) cudaFree(d_batch_input);
+    if (d_batch_output) cudaFree(d_batch_output);
 }
 
 void AutoencoderCUDA::forward() {
@@ -1108,4 +1112,101 @@ void AutoencoderCUDA::extract_features_async(const float* input_chw, float* outp
     // Copy features to host (ASYNC)
     CUDA_CHECK(cudaMemcpyAsync(output_features, d_pool2_out, 128 * 8 * 8 * sizeof(float),
                               cudaMemcpyDeviceToHost, stream));
+}
+
+// ============================================================================
+// BATCH PROCESSING IMPLEMENTATION
+// ============================================================================
+
+float AutoencoderCUDA::train_step_batch(const float* input_batch, int batch_size, float learning_rate) {
+    // Allocate/reallocate batch buffers if needed
+    if (batch_size > allocated_batch_size) {
+        if (d_batch_input) cudaFree(d_batch_input);
+        if (d_batch_output) cudaFree(d_batch_output);
+        
+        CUDA_CHECK(cudaMalloc(&d_batch_input, batch_size * 3 * 32 * 32 * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_batch_output, batch_size * 3 * 32 * 32 * sizeof(float)));
+        allocated_batch_size = batch_size;
+    }
+    
+    // Copy entire batch to device in one transfer
+    CUDA_CHECK(cudaMemcpy(d_batch_input, input_batch,
+                         batch_size * 3 * 32 * 32 * sizeof(float),
+                         cudaMemcpyHostToDevice));
+    
+    // Forward pass on batch
+    forward_batch(batch_size);
+    
+    // Compute loss for entire batch
+    CUDA_CHECK(cudaMemset(d_loss, 0, sizeof(float)));
+    int total_size = batch_size * 3 * 32 * 32;
+    mse_loss_vec4<<<(total_size / 4 + 255) / 256, 256>>>(
+        d_batch_output, d_batch_input, d_loss, d_grad_conv5, total_size);
+    CUDA_CHECK(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // Backward pass on batch
+    backward_batch(batch_size);
+    
+    // Update weights
+    update_weights(learning_rate);
+    
+    return last_loss;
+}
+
+void AutoencoderCUDA::forward_batch(int N) {
+    // Process batch by iterating through each image
+    // This is a simple implementation - not fully optimized but functional
+    for (int n = 0; n < N; n++) {
+        // Copy single image to d_input
+        CUDA_CHECK(cudaMemcpy(d_input, d_batch_input + n * 3 * 32 * 32,
+                             3 * 32 * 32 * sizeof(float), cudaMemcpyDeviceToDevice));
+        
+        // Run forward pass for single image
+        forward();
+        
+        // Copy result to batch output
+        CUDA_CHECK(cudaMemcpy(d_batch_output + n * 3 * 32 * 32, d_conv5_out,
+                             3 * 32 * 32 * sizeof(float), cudaMemcpyDeviceToDevice));
+    }
+}
+
+void AutoencoderCUDA::backward_batch(int N) {
+    // Zero out gradients before accumulating
+    CUDA_CHECK(cudaMemset(d_conv2_w_grad, 0, h_conv2_w.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_conv2_b_grad, 0, h_conv2_b.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_conv3_w_grad, 0, h_conv3_w.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_conv3_b_grad, 0, h_conv3_b.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_conv4_w_grad, 0, h_conv4_w.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_conv4_b_grad, 0, h_conv4_b.size() * sizeof(float)));
+    
+    // Accumulate gradients from each image in batch
+    for (int n = 0; n < N; n++) {
+        // Set d_input to current image
+        CUDA_CHECK(cudaMemcpy(d_input, d_batch_input + n * 3 * 32 * 32,
+                             3 * 32 * 32 * sizeof(float), cudaMemcpyDeviceToDevice));
+        
+        // Set d_conv5_out to current output
+        CUDA_CHECK(cudaMemcpy(d_conv5_out, d_batch_output + n * 3 * 32 * 32,
+                             3 * 32 * 32 * sizeof(float), cudaMemcpyDeviceToDevice));
+        
+        // Run backward to accumulate gradients
+        backward();
+    }
+    
+    // Divide gradients by batch size to get average
+    float scale = 1.0f / N;
+    
+    int total_w2 = h_conv2_w.size();
+    sgd_update_vec4<<<(total_w2 / 4 + 255) / 256, 256>>>(d_conv2_w_grad, d_conv2_w_grad, -scale, total_w2);
+    sgd_update_vec4<<<(128 / 4 + 255) / 256, 256>>>(d_conv2_b_grad, d_conv2_b_grad, -scale, 128);
+    
+    int total_w3 = h_conv3_w.size();
+    sgd_update_vec4<<<(total_w3 / 4 + 255) / 256, 256>>>(d_conv3_w_grad, d_conv3_w_grad, -scale, total_w3);
+    sgd_update_vec4<<<(128 / 4 + 255) / 256, 256>>>(d_conv3_b_grad, d_conv3_b_grad, -scale, 128);
+    
+    int total_w4 = h_conv4_w.size();
+    sgd_update_vec4<<<(total_w4 / 4 + 255) / 256, 256>>>(d_conv4_w_grad, d_conv4_w_grad, -scale, total_w4);
+    sgd_update_vec4<<<(256 / 4 + 255) / 256, 256>>>(d_conv4_b_grad, d_conv4_b_grad, -scale, 256);
+    
+    CUDA_CHECK(cudaGetLastError());
 }
