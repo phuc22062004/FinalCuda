@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Train and test SVM using cuML with CIFAR-10 features
-Usage: python training_svm.py --train <train_file> --test <test_file> [options]
+Test SVM using pre-trained cuML model (no training required)
+Usage: python testing_svm.py --model <model_file> --test <test_file>
 """
 
 import argparse
@@ -11,7 +11,6 @@ import cudf
 import pandas as pd
 from sklearn.datasets import load_svmlight_file
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from cuml.svm import SVC
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pickle
@@ -19,38 +18,42 @@ import os
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Train and test SVM using cuML for CIFAR-10 classification'
+        description='Test pre-trained SVM model for CIFAR-10 classification'
     )
-    parser.add_argument('--train', type=str, required=True,
-                       help='Training features file (LibSVM format)')
+    parser.add_argument('--model', type=str, required=True,
+                       help='Trained model file (.pkl)')
     parser.add_argument('--test', type=str, required=True,
                        help='Test features file (LibSVM format)')
-    parser.add_argument('--C', type=float, default=10.0,
-                       help='SVM C parameter (default: 10.0)')
-    parser.add_argument('--gamma', type=str, default='scale',
-                       help='Gamma parameter: scale/auto/float (default: scale)')
-    parser.add_argument('--kernel', type=str, default='rbf',
-                       choices=['rbf', 'linear', 'poly', 'sigmoid'],
-                       help='Kernel type (default: rbf)')
-    parser.add_argument('--max-iter', type=int, default=-1,
-                       help='Maximum iterations (default: -1 = no limit)')
-    parser.add_argument('--tol', type=float, default=1e-3,
-                       help='Tolerance for stopping criterion (default: 1e-3)')
-    parser.add_argument('--cache-size', type=int, default=2000,
-                       help='Cache size in MB (default: 2000)')
-    parser.add_argument('--predictions', type=str, default='predictions_cuml.txt',
-                       help='Output file for predictions (default: predictions_cuml.txt)')
-    parser.add_argument('--cm-output', type=str, default='confusion_matrix_cuml.png',
-                       help='Confusion matrix output file (default: confusion_matrix_cuml.png)')
+    parser.add_argument('--predictions', type=str, default='predictions_test.txt',
+                       help='Output file for predictions (default: predictions_test.txt)')
+    parser.add_argument('--cm-output', type=str, default='confusion_matrix_test.png',
+                       help='Confusion matrix output file (default: confusion_matrix_test.png)')
     parser.add_argument('--no-plot', action='store_true',
                        help='Skip plotting confusion matrix')
-    parser.add_argument('--save-model', type=str, default='svm_model_cuml.pkl',
-                       help='Output file for trained model (default: svm_model_cuml.pkl)')
     return parser.parse_args()
+
+def load_model(model_path):
+    """Load pre-trained SVM model"""
+    print(f"Loading pre-trained model from: {model_path}")
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    start_time = time.time()
+    with open(model_path, 'rb') as f:
+        clf = pickle.load(f)
+    load_time = time.time() - start_time
+    
+    model_size = os.path.getsize(model_path) / (1024 * 1024)
+    print(f"  Model file size: {model_size:.2f} MB")
+    print(f"  Load time: {load_time:.2f}s")
+    print(f"✓ Model loaded successfully")
+    
+    return clf
 
 def load_data(file_path):
     """Load features from LibSVM format file"""
-    print(f"Loading data from: {file_path}")
+    print(f"\nLoading test data from: {file_path}")
     start_time = time.time()
     X, y = load_svmlight_file(file_path)
     X = X.toarray()  # Convert sparse to dense
@@ -59,63 +62,18 @@ def load_data(file_path):
     print(f"  Load time: {load_time:.2f}s")
     return X, y.astype(int)
 
-def train_svm(X_train, y_train, args):
-    """Train SVM classifier using cuML"""
-    print("\n" + "="*60)
-    print("Training SVM Classifier with cuML")
-    print("="*60)
-    print(f"Training samples:    {X_train.shape[0]}")
-    print(f"Feature dimension:   {X_train.shape[1]}")
-    print(f"Number of classes:   {len(np.unique(y_train))}")
-    print(f"C parameter:         {args.C}")
-    print(f"Gamma:               {args.gamma}")
-    print(f"Kernel:              {args.kernel}")
-    print(f"Max iterations:      {args.max_iter}")
-    print(f"Tolerance:           {args.tol}")
-    print(f"Cache size:          {args.cache_size} MB")
-    print("="*60)
-    
-    # Convert to cuDF
-    print("\nConverting to cuDF format...")
-    convert_start = time.time()
-    X_train_cudf = cudf.DataFrame.from_pandas(pd.DataFrame(X_train))
-    y_train_cudf = cudf.Series(y_train)
-    convert_time = time.time() - convert_start
-    print(f"  Conversion time: {convert_time:.2f}s")
-    
-    # Create SVM classifier
-    print("\nInitializing SVM classifier...")
-    clf = SVC(
-        C=args.C,
-        kernel=args.kernel,
-        gamma=args.gamma,
-        cache_size=args.cache_size,
-        max_iter=args.max_iter,
-        tol=args.tol
-    )
-    
-    # Train
-    print("\nTraining started...")
-    train_start = time.time()
-    clf.fit(X_train_cudf, y_train_cudf)
-    train_time = time.time() - train_start
-    
-    print(f"✓ Training completed in {train_time:.2f} seconds")
-    
-    return clf, train_time
-
 def test_svm(clf, X_test, y_test):
     """Test SVM classifier and compute predictions"""
     print("\n" + "="*60)
     print("Testing SVM Classifier")
     print("="*60)
     print(f"Test samples: {X_test.shape[0]}")
+    print(f"Feature dimension: {X_test.shape[1]}")
     
     # Convert to cuDF
     print("\nConverting test data to cuDF format...")
     convert_start = time.time()
     X_test_cudf = cudf.DataFrame.from_pandas(pd.DataFrame(X_test))
-    y_test_cudf = cudf.Series(y_test)
     convert_time = time.time() - convert_start
     print(f"  Conversion time: {convert_time:.2f}s")
     
@@ -123,10 +81,17 @@ def test_svm(clf, X_test, y_test):
     print("\nPredicting...")
     predict_start = time.time()
     y_pred = clf.predict(X_test_cudf)
-    y_pred_np = y_pred.to_numpy()
+    
+    # Convert cuML predictions to numpy
+    try:
+        y_pred_np = y_pred.to_numpy()
+    except:
+        y_pred_np = np.array(y_pred)
+    
     predict_time = time.time() - predict_start
     
     print(f"✓ Prediction completed in {predict_time:.2f} seconds")
+    print(f"  Throughput: {len(y_test) / predict_time:.0f} samples/second")
     
     return y_pred_np, predict_time
 
@@ -182,7 +147,8 @@ def plot_confusion_matrix(cm, output_file):
                 xticklabels=cifar10_classes,
                 yticklabels=cifar10_classes,
                 cbar_kws={'label': 'Count'})
-    plt.title('Confusion Matrix - CIFAR-10 Classification (cuML SVM)', fontsize=14, pad=20)
+    plt.title('Confusion Matrix - CIFAR-10 Classification (cuML SVM - Testing)', 
+              fontsize=14, pad=20)
     plt.ylabel('True Label', fontsize=12)
     plt.xlabel('Predicted Label', fontsize=12)
     plt.xticks(rotation=45, ha='right')
@@ -196,32 +162,28 @@ def main():
     args = parse_args()
     
     print("\n" + "="*60)
-    print("cuML SVM Training Pipeline for CIFAR-10")
+    print("cuML SVM Testing Pipeline for CIFAR-10")
     print("="*60)
-    print(f"Training file:       {args.train}")
+    print(f"Model file:          {args.model}")
     print(f"Test file:           {args.test}")
     print(f"Predictions output:  {args.predictions}")
     print(f"Confusion matrix:    {args.cm_output}")
     print("="*60)
     
-    # Load training data
-    print("\n[1/5] Loading training data...")
-    X_train, y_train = load_data(args.train)
+    # Load pre-trained model
+    print("\n[1/4] Loading pre-trained model...")
+    clf = load_model(args.model)
     
     # Load test data
-    print("\n[2/5] Loading test data...")
+    print("\n[2/4] Loading test data...")
     X_test, y_test = load_data(args.test)
     
-    # Train SVM
-    print("\n[3/5] Training SVM...")
-    clf, train_time = train_svm(X_train, y_train, args)
-    
     # Test SVM
-    print("\n[4/5] Testing SVM...")
+    print("\n[3/4] Testing SVM...")
     y_pred, test_time = test_svm(clf, X_test, y_test)
     
     # Evaluate and print results
-    print("\n[5/5] Computing metrics...")
+    print("\n[4/4] Computing metrics...")
     cm, accuracy = print_results(y_test, y_pred)
     
     # Save predictions
@@ -232,24 +194,16 @@ def main():
     if not args.no_plot:
         plot_confusion_matrix(cm, args.cm_output)
     
-    # Save trained model
-    print(f"\nSaving trained model to: {args.save_model}")
-    with open(args.save_model, 'wb') as f:
-        pickle.dump(clf, f)
-    print(f"✓ Model saved successfully")
-    print(f"  Model file size: {os.path.getsize(args.save_model) / (1024*1024):.2f} MB")
-    
     # Final summary
     print("\n" + "="*60)
     print("FINAL SUMMARY")
     print("="*60)
-    print(f"Training time:       {train_time:.2f} seconds")
     print(f"Testing time:        {test_time:.2f} seconds")
-    print(f"Total time:          {train_time + test_time:.2f} seconds")
+    print(f"Throughput:          {len(y_test) / test_time:.0f} samples/second")
     print(f"Final accuracy:      {accuracy*100:.2f}%")
     print(f"Backend:             cuML (GPU)")
     print("="*60)
-    print("\n✓ Pipeline completed successfully!\n")
+    print("\n✓ Testing completed successfully!\n")
 
 if __name__ == '__main__':
     main()
