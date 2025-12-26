@@ -1,7 +1,7 @@
 // Optimized CUDA Autoencoder V2: Kernel-Level Optimizations
-// Based on basic version + memory optimizations from V1 + kernel optimizations
+// Based on basic version + some memory optimizations options from V1 + kernel optimizations
 //
-// Memory Optimizations (from V1):
+// Memory Optimizations options (from V1):
 //   1. In-place ReLU activations (no separate output buffers)
 //   2. Gradient buffer reuse across layers
 //   3. Memory coalescing: threadIdx.x for width dimension
