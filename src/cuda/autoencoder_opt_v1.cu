@@ -1,4 +1,4 @@
-// Optimized CUDA Autoencoder V2: Shared Memory Tiling
+// Optimized CUDA Autoencoder V1: Shared Memory Tiling
 // Key optimizations:
 // 1. Shared memory tiling for input data and weights (major improvement!)
 // 2. Memory coalescing: threadIdx.x for width (ow), threadIdx.y for height (oh)
