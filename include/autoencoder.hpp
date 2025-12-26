@@ -30,6 +30,9 @@ class AutoencoderCPU {
         float train_step(const Tensor3D& x, float learning_rate);
         float get_loss() const { return last_loss; }
         
+        // Extract features from encoder bottleneck (128*8*8 = 8192 features)
+        void extract_features(const float* input_chw, float* output_features);
+        
         bool save_weights(const std::string& filepath) const;
         bool load_weights(const std::string& filepath);
     

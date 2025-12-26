@@ -418,3 +418,27 @@ bool AutoencoderCPU::load_weights(const std::string& filepath) {
     file.close();
     return true;
 }
+
+// Extract features from encoder bottleneck (128*8*8 = 8192 features)
+void AutoencoderCPU::extract_features(const float* input_chw, float* output_features) {
+    // Convert input to Tensor3D (3x32x32)
+    Tensor3D x(3, 32, 32);
+    for (int i = 0; i < 3072; i++) {
+        x.data[i] = input_chw[i];
+    }
+    
+    // Run encoder only (stop at bottleneck)
+    Tensor3D conv1_out = conv2d(x, conv1_w, conv1_b, 256, true);
+    Tensor3D relu1_out = relu(conv1_out);
+    Tensor3D pool1_out = maxpool(relu1_out);
+    
+    Tensor3D conv2_out = conv2d(pool1_out, conv2_w, conv2_b, 128, true);
+    Tensor3D relu2_out = relu(conv2_out);
+    Tensor3D bottleneck = maxpool(relu2_out);  // 128x8x8 = 8192
+    
+    // Copy bottleneck features to output
+    for (int i = 0; i < 8192; i++) {
+        output_features[i] = bottleneck.data[i];
+    }
+}
+
