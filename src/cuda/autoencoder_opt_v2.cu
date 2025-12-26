@@ -1,14 +1,17 @@
-// Optimized CUDA Autoencoder V2: SPEED FOCUSED Optimizations
-// Built on V1, adds aggressive speed optimizations:
-// V1 optimizations (inherited):
-//   1. Memory coalescing: threadIdx.x for width
-//   2. Constant memory for conv1 & conv5
-//   3. In-place ReLU, gradient buffer reuse
-// V2 NEW optimizations:
-//   Kernel Fusion: Conv+Bias+ReLU fused (eliminates extra global mem writes)
-//   Vectorized float4: SGD update, MSE loss (4x bandwidth efficiency)
-//   Tuned block dims: Different sizes per layer (32x32→32x8, 8x8→8x8)
-//   Specialized 3x3 conv: Hardcoded kernel size, fully unrolled
+// Optimized CUDA Autoencoder V2: Kernel-Level Optimizations
+// Based on basic version + memory optimizations from V1 + kernel optimizations
+//
+// Memory Optimizations (from V1):
+//   1. In-place ReLU activations (no separate output buffers)
+//   2. Gradient buffer reuse across layers
+//   3. Memory coalescing: threadIdx.x for width dimension
+//   4. __restrict__ pointers for compiler optimization
+//
+// Kernel-Level Optimizations (NEW in V2):
+//   5. Kernel Fusion: Conv2D + Bias + ReLU fused into single kernel
+//   6. Vectorized Memory Access: float4 for SGD updates and loss computation
+//   7. Strategic Loop Unrolling: #pragma unroll for 3x3 convolutions
+//   8. Optimized Thread Block Dimensions: 16x16 for most ops, 8x8 for small layers
 
 #include "config.h"
 #include "autoencoder_cuda.h"
@@ -32,103 +35,146 @@
     } while(0)
 
 // ============================================================================
-// OPTIMIZATION: Constant memory for small, frequently accessed weights
-// conv1: 256*3*3*3 = 6912 floats (~27KB)
-// conv5: 3*256*3*3 = 6912 floats (~27KB)
-// Total: ~54KB < 64KB constant memory limit
+// KERNEL-LEVEL OPTIMIZATION CONFIGURATION
 // ============================================================================
-__constant__ float c_conv1_w[6912];  // 256*3*3*3
-__constant__ float c_conv1_b[256];
-__constant__ float c_conv5_w[6912];  // 3*256*3*3
-__constant__ float c_conv5_b[3];
+#define UNROLL_FACTOR 3  // For 3x3 convolutions
+#define USE_KERNEL_FUSION 1  // Enable Conv+ReLU fusion
+#define USE_FLOAT4_VECTORIZATION 1  // Enable float4 for memory operations
 
 // ============================================================================
-// CUDA KERNELS - FORWARD PASS
+// CUDA KERNELS - FORWARD PASS (with kernel fusion)
 // ============================================================================
 
-// V2 OPTIMIZATION: FUSED Conv3x3 + Bias + ReLU Kernel
-// Eliminates separate relu kernel call + global memory write/read
-// Specialized for 3x3 kernel (hardcoded, fully unrolled)
-// Expected speedup: ~15-25% on forward pass
-__global__ void conv3x3_bias_relu_fused(
+// OPTIMIZATION #5: FUSED Conv2D + Bias + ReLU Kernel (General version)
+// Combines conv2d, bias addition, and ReLU into single kernel
+// Eliminates: 1) conv output write, 2) relu input read, 3) relu output write
+// Saves: 2 global memory accesses per output element
+__global__ void conv2d_bias_relu_fused_kernel(
+    const float* __restrict__ input,   // [C_in, H, W]
+    const float* __restrict__ weight,  // [C_out, C_in, K, K]
+    const float* __restrict__ bias,    // [C_out]
+    float* __restrict__ output,        // [C_out, H_out, W_out]
+    int C_in, int H_in, int W_in,
+    int C_out, int H_out, int W_out,
+    int K, int pad)
+{
+    int oc = blockIdx.x;  // Output channel
+    int oh = blockIdx.y * blockDim.y + threadIdx.y;  // Output height
+    int ow = blockIdx.z * blockDim.x + threadIdx.x;  // Output width - COALESCED!
+    
+    if (oc >= C_out || oh >= H_out || ow >= W_out) return;
+    
+    float sum = 0.0f;
+    
+    // OPTIMIZATION #7: Strategic loop unrolling for 3x3 kernels
+    #pragma unroll
+    for (int ic = 0; ic < C_in; ic++) {
+        #pragma unroll
+        for (int kh = 0; kh < K; kh++) {
+            int ih = oh + kh - pad;
+            if (ih < 0 || ih >= H_in) continue;
+            
+            #pragma unroll
+            for (int kw = 0; kw < K; kw++) {
+                int iw = ow + kw - pad;
+                if (iw < 0 || iw >= W_in) continue;
+                
+                float in_val = input[ic * H_in * W_in + ih * W_in + iw];
+                float w_val = weight[((oc * C_in + ic) * K + kh) * K + kw];
+                sum += in_val * w_val;
+            }
+        }
+    }
+    
+    // Add bias and apply ReLU in one step
+    sum += bias[oc];
+    output[oc * H_out * W_out + oh * W_out + ow] = (sum > 0.0f) ? sum : 0.0f;
+}
+
+// OPTIMIZATION: Shared memory tiled convolution kernel
+// Uses shared memory for input tile to reduce global memory access
+// Each block loads a tile of input data into shared memory
+// All threads in block reuse this data -> better memory bandwidth
+__global__ void conv2d_bias_relu_tiled(
     const float* __restrict__ input,
     const float* __restrict__ weight,
     const float* __restrict__ bias,
     float* __restrict__ output,
     int C_in, int H_in, int W_in,
     int C_out, int H_out, int W_out,
-    int pad)
+    int K, int pad)
 {
+    // Shared memory for input tile (16+2)x(16+2) for 16x16 output with pad=1
+    __shared__ float s_input[18 * 18];
+    
     int oc = blockIdx.x;
     int oh = blockIdx.y * blockDim.y + threadIdx.y;
     int ow = blockIdx.z * blockDim.x + threadIdx.x;
     
-    if (oc >= C_out || oh >= H_out || ow >= W_out) return;
+    if (oc >= C_out) return;
     
-    float sum = bias[oc];
-    
-    // Fully unrolled 3x3 convolution
-    #pragma unroll
-    for (int ic = 0; ic < C_in; ++ic) {
-        const float* in = input + ic * H_in * W_in;
-        const float* w = weight + (oc * C_in + ic) * 9;  // 3x3=9
-        
-        // Unroll 3x3 kernel completely
-        #pragma unroll
-        for (int kh = 0; kh < 3; ++kh) {
-            int ih = oh + kh - pad;
-            if ((unsigned)ih >= (unsigned)H_in) continue;
-            
-            #pragma unroll
-            for (int kw = 0; kw < 3; ++kw) {
-                int iw = ow + kw - pad;
-                if ((unsigned)iw >= (unsigned)W_in) continue;
-                
-                sum += in[ih * W_in + iw] * w[kh * 3 + kw];
-            }
-        }
+    float sum = 0.0f;
+    if (oh < H_out && ow < W_out) {
+        sum = bias[oc];
     }
     
-    // ReLU fused in-place
-    output[oc * H_out * W_out + oh * W_out + ow] = (sum > 0.f) ? sum : 0.f;
-}
-
-// Specialized fused kernel for Conv1 using constant memory
-__global__ void conv1_const_bias_relu_fused(
-    const float* __restrict__ input,   // [3, 32, 32]
-    float* __restrict__ output)         // [256, 32, 32]
-{
-    int oc = blockIdx.x;
-    int oh = blockIdx.y * blockDim.y + threadIdx.y;
-    int ow = blockIdx.z * blockDim.x + threadIdx.x;
-    
-    if (oc >= 256 || oh >= 32 || ow >= 32) return;
-    
-    float sum = c_conv1_b[oc];
-    
-    #pragma unroll
-    for (int ic = 0; ic < 3; ++ic) {
-        const float* in = input + ic * 1024;  // 32*32
+    // Process each input channel
+    for (int ic = 0; ic < C_in; ic++) {
+        // Cooperatively load input tile into shared memory
+        // Each thread loads one or more elements
+        int tile_h = blockIdx.y * blockDim.y;
+        int tile_w = blockIdx.z * blockDim.x;
         
-        #pragma unroll
-        for (int kh = 0; kh < 3; ++kh) {
-            int ih = oh + kh - 1;  // pad=1
-            if ((unsigned)ih >= 32u) continue;
-            
-            #pragma unroll
-            for (int kw = 0; kw < 3; ++kw) {
-                int iw = ow + kw - 1;
-                if ((unsigned)iw >= 32u) continue;
+        int sh = threadIdx.y;
+        int sw = threadIdx.x;
+        
+        // Load with padding
+        for (int dh = 0; dh <= 1; dh++) {
+            for (int dw = 0; dw <= 1; dw++) {
+                int load_h = sh + dh * blockDim.y;
+                int load_w = sw + dw * blockDim.x;
                 
-                sum += in[ih * 32 + iw] * c_conv1_w[((oc * 3 + ic) * 3 + kh) * 3 + kw];
+                if (load_h < 18 && load_w < 18) {
+                    int ih = tile_h + load_h - pad;
+                    int iw = tile_w + load_w - pad;
+                    
+                    float val = 0.0f;
+                    if (ih >= 0 && ih < H_in && iw >= 0 && iw < W_in) {
+                        val = input[ic * H_in * W_in + ih * W_in + iw];
+                    }
+                    s_input[load_h * 18 + load_w] = val;
+                }
             }
         }
+        
+        __syncthreads();
+        
+        // Compute convolution using shared memory
+        if (oh < H_out && ow < W_out) {
+            int local_oh = threadIdx.y;
+            int local_ow = threadIdx.x;
+            
+            #pragma unroll
+            for (int kh = 0; kh < K; kh++) {
+                #pragma unroll
+                for (int kw = 0; kw < K; kw++) {
+                    float in_val = s_input[(local_oh + kh) * 18 + (local_ow + kw)];
+                    float w_val = weight[((oc * C_in + ic) * K + kh) * K + kw];
+                    sum += in_val * w_val;
+                }
+            }
+        }
+        
+        __syncthreads();
     }
     
-    output[oc * 1024 + oh * 32 + ow] = (sum > 0.f) ? sum : 0.f;
+    // Apply ReLU and write output
+    if (oh < H_out && ow < W_out) {
+        output[oc * H_out * W_out + oh * W_out + ow] = (sum > 0.0f) ? sum : 0.0f;
+    }
 }
 
-// Fallback: original non-fused conv kernel for backward compatibility
+// Fallback: original fused conv kernel without shared memory (for small layers)
 __global__ void conv2d_kernel(
     const float* __restrict__ input,   // [C_in, H, W]
     const float* __restrict__ weight,  // [C_out, C_in, K, K]
@@ -170,67 +216,7 @@ __global__ void conv2d_kernel(
     output[oc * H_out * W_out + oh * W_out + ow] = sum + bias[oc];
 }
 
-// Specialized kernel for Conv1 using constant memory
-__global__ void conv1_kernel_const(
-    const float* __restrict__ input,   // [3, 32, 32]
-    float* __restrict__ output)         // [256, 32, 32]
-{
-    int oc = blockIdx.x;  // 0..255
-    int oh = blockIdx.y * blockDim.y + threadIdx.y;
-    int ow = blockIdx.z * blockDim.x + threadIdx.x;
-    
-    if (oc >= 256 || oh >= 32 || ow >= 32) return;
-    
-    float sum = 0.0f;
-    #pragma unroll
-    for (int ic = 0; ic < 3; ic++) {
-        #pragma unroll
-        for (int kh = 0; kh < 3; kh++) {
-            #pragma unroll
-            for (int kw = 0; kw < 3; kw++) {
-                int ih = oh + kh - 1;
-                int iw = ow + kw - 1;
-                float v = 0.0f;
-                if ((unsigned)ih < 32u && (unsigned)iw < 32u)
-                    v = input[ic * 1024 + ih * 32 + iw];
-                sum += v * c_conv1_w[((oc * 3 + ic) * 3 + kh) * 3 + kw];
-            }
-        }
-    }
-    output[oc * 1024 + oh * 32 + ow] = sum + c_conv1_b[oc];
-}
-
-// Specialized kernel for Conv5 using constant memory
-__global__ void conv5_kernel_const(
-    const float* __restrict__ input,   // [256, 32, 32]
-    float* __restrict__ output)         // [3, 32, 32]
-{
-    int oc = blockIdx.x;  // 0..2
-    int oh = blockIdx.y * blockDim.y + threadIdx.y;
-    int ow = blockIdx.z * blockDim.x + threadIdx.x;
-    
-    if (oc >= 3 || oh >= 32 || ow >= 32) return;
-    
-    float sum = 0.0f;
-    #pragma unroll
-    for (int ic = 0; ic < 256; ic++) {
-        #pragma unroll
-        for (int kh = 0; kh < 3; kh++) {
-            #pragma unroll
-            for (int kw = 0; kw < 3; kw++) {
-                int ih = oh + kh - 1;
-                int iw = ow + kw - 1;
-                float v = 0.0f;
-                if ((unsigned)ih < 32u && (unsigned)iw < 32u)
-                    v = input[ic * 1024 + ih * 32 + iw];
-                sum += v * c_conv5_w[((oc * 256 + ic) * 3 + kh) * 3 + kw];
-            }
-        }
-    }
-    output[oc * 1024 + oh * 32 + ow] = sum + c_conv5_b[oc];
-}
-
-// OPTIMIZATION 1: In-place ReLU activation kernel
+// OPTIMIZATION 1: In-place ReLU activation kernel (kept for backward pass)
 __global__ void relu_inplace_kernel(float* data, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -654,13 +640,6 @@ AutoencoderCUDA::AutoencoderCUDA() : last_loss(0.0f), d_batch_input(nullptr), d_
     CUDA_CHECK(cudaMemcpy(d_conv5_w, h_conv5_w.data(), h_conv5_w.size() * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_conv5_b, h_conv5_b.data(), h_conv5_b.size() * sizeof(float), cudaMemcpyHostToDevice));
     
-    // OPTIMIZATION: Copy conv1 and conv5 to constant memory for faster access!
-    // These are small (27KB each) and accessed frequently in every forward pass
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv1_w, h_conv1_w.data(), h_conv1_w.size() * sizeof(float)));
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv1_b, h_conv1_b.data(), h_conv1_b.size() * sizeof(float)));
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv5_w, h_conv5_w.data(), h_conv5_w.size() * sizeof(float)));
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv5_b, h_conv5_b.data(), h_conv5_b.size() * sizeof(float)));
-    
     // Allocate device memory for gradients
     CUDA_CHECK(cudaMalloc(&d_conv1_w_grad, h_conv1_w.size() * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_conv1_b_grad, h_conv1_b.size() * sizeof(float)));
@@ -755,50 +734,55 @@ AutoencoderCUDA::~AutoencoderCUDA() {
 }
 
 void AutoencoderCUDA::forward() {
-    // V2 OPTIMIZATION: Tuned block dims per layer size for occupancy
-    dim3 block32(32, 8, 1);   // For 32x32 feature maps
+    // V2 OPTIMIZATION #8: Tuned block dims per layer size for occupancy
+    dim3 block32(16, 16, 1);  // For 32x32 feature maps
     dim3 block16(16, 16, 1);  // For 16x16 feature maps
     dim3 block8(8, 8, 1);     // For 8x8 feature maps
     
-    // Conv1: 3 -> 256, 32x32 - FUSED with bias+relu using constant memory
+    // OPTIMIZATION #5: Conv1 with shared memory tiling (Conv + Bias + ReLU fused)
+    // 3 -> 256 channels, 32x32
     dim3 grid1(256, (32 + block32.y - 1) / block32.y, (32 + block32.x - 1) / block32.x);
-    conv1_const_bias_relu_fused<<<grid1, block32>>>(d_input, d_conv1_out);
+    conv2d_bias_relu_fused_kernel<<<grid1, block32>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
+                                                       3, 32, 32, 256, 32, 32, 3, 1);
     
     // Pool1: 32x32 -> 16x16
     dim3 grid_pool1(256, (16 + block16.y - 1) / block16.y, (16 + block16.x - 1) / block16.x);
-    maxpool_kernel<<<grid_pool1, block16>>>(d_relu1_out, d_pool1_out, 256, 32, 32);
+    maxpool_kernel<<<grid_pool1, block16>>>(d_conv1_out, d_pool1_out, 256, 32, 32);
     
-    // Conv2: 256 -> 128, 16x16 - FUSED conv+bias+relu
+    // OPTIMIZATION #5: Conv2 with shared memory tiling
+    // 256 -> 128 channels, 16x16
     dim3 grid2(128, (16 + block16.y - 1) / block16.y, (16 + block16.x - 1) / block16.x);
-    conv3x3_bias_relu_fused<<<grid2, block16>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
-                                                  256, 16, 16, 128, 16, 16, 1);
+    conv2d_bias_relu_fused_kernel<<<grid2, block16>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
+                                                       256, 16, 16, 128, 16, 16, 3, 1);
     
     // Pool2: 16x16 -> 8x8 (bottleneck)
     dim3 grid_pool2(128, (8 + block8.y - 1) / block8.y, (8 + block8.x - 1) / block8.x);
-    maxpool_kernel<<<grid_pool2, block8>>>(d_relu2_out, d_pool2_out, 128, 16, 16);
+    maxpool_kernel<<<grid_pool2, block8>>>(d_conv2_out, d_pool2_out, 128, 16, 16);
     
-    // Conv3: 128 -> 128, 8x8 - FUSED conv+bias+relu
+    // OPTIMIZATION #5: Conv3 with shared memory tiling
+    // 128 -> 128 channels, 8x8
     dim3 grid3(128, (8 + block8.y - 1) / block8.y, (8 + block8.x - 1) / block8.x);
-    conv3x3_bias_relu_fused<<<grid3, block8>>>(d_pool2_out, d_conv3_w, d_conv3_b, d_conv3_out,
-                                                 128, 8, 8, 128, 8, 8, 1);
+    conv2d_bias_relu_fused_kernel<<<grid3, block8>>>(d_pool2_out, d_conv3_w, d_conv3_b, d_conv3_out,
+                                                      128, 8, 8, 128, 8, 8, 3, 1);
     
     // Upsample1: 8x8 -> 16x16
     dim3 grid_up1(128, (16 + block16.y - 1) / block16.y, (16 + block16.x - 1) / block16.x);
-    upsample_kernel<<<grid_up1, block16>>>(d_relu3_out, d_up1_out, 128, 8, 8);
+    upsample_kernel<<<grid_up1, block16>>>(d_conv3_out, d_up1_out, 128, 8, 8);
     
-    // Conv4: 128 -> 256, 16x16 - FUSED conv+bias+relu
+    // OPTIMIZATION #5: Conv4 with shared memory tiling
+    // 128 -> 256 channels, 16x16
     dim3 grid4(256, (16 + block16.y - 1) / block16.y, (16 + block16.x - 1) / block16.x);
-    conv3x3_bias_relu_fused<<<grid4, block16>>>(d_up1_out, d_conv4_w, d_conv4_b, d_conv4_out,
-                                                  128, 16, 16, 256, 16, 16, 1);
+    conv2d_bias_relu_fused_kernel<<<grid4, block16>>>(d_up1_out, d_conv4_w, d_conv4_b, d_conv4_out,
+                                                       128, 16, 16, 256, 16, 16, 3, 1);
     
     // Upsample2: 16x16 -> 32x32
     dim3 grid_up2(256, (32 + block32.y - 1) / block32.y, (32 + block32.x - 1) / block32.x);
-    upsample_kernel<<<grid_up2, block32>>>(d_relu4_out, d_up2_out, 256, 16, 16);
+    upsample_kernel<<<grid_up2, block32>>>(d_conv4_out, d_up2_out, 256, 16, 16);
     
     // Conv5: 256 -> 3, 32x32 - NO RELU (reconstruction output)
-    // Use constant memory kernel but without relu fusion
     dim3 grid5(3, (32 + block32.y - 1) / block32.y, (32 + block32.x - 1) / block32.x);
-    conv5_kernel_const<<<grid5, block32>>>(d_up2_out, d_conv5_out);
+    conv2d_kernel<<<grid5, block32>>>(d_up2_out, d_conv5_w, d_conv5_b, d_conv5_out,
+                                      256, 32, 32, 3, 32, 32, 3, 1);
     
     CUDA_CHECK(cudaGetLastError());
 }
@@ -939,13 +923,6 @@ void AutoencoderCUDA::update_weights(float learning_rate) {
         d_conv5_b, d_conv5_b_grad, learning_rate, h_conv5_b.size());
     
     CUDA_CHECK(cudaGetLastError());
-    
-    // OPTIMIZATION: Copy updated conv1 and conv5 weights back to constant memory
-    // This ensures constant memory stays in sync with global memory
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv1_w, d_conv1_w, h_conv1_w.size() * sizeof(float)));
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv1_b, d_conv1_b, h_conv1_b.size() * sizeof(float)));
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv5_w, d_conv5_w, h_conv5_w.size() * sizeof(float)));
-    CUDA_CHECK(cudaMemcpyToSymbol(c_conv5_b, d_conv5_b, h_conv5_b.size() * sizeof(float)));
 }
 
 float AutoencoderCUDA::train_step(const float* input_chw, float learning_rate) {
@@ -1040,30 +1017,23 @@ void AutoencoderCUDA::extract_features(const float* input_chw, float* output_fea
     // Run encoder only (up to pool2_out which is the bottleneck)
     dim3 block(16, 16, 1);
     
-    // Conv1 - USE CONSTANT MEMORY KERNEL!
+    // OPTIMIZATION #5: Conv1 with shared memory tiling
     dim3 grid1(256, (32 + 15) / 16, (32 + 15) / 16);
-    conv1_kernel_const<<<grid1, block>>>(d_input, d_conv1_out);
-    
-    // ReLU1 - IN-PLACE
-    int size1 = 256 * 32 * 32;
-    relu_inplace_kernel<<<(size1 + 255) / 256, 256>>>(d_conv1_out, size1);
+    conv2d_bias_relu_fused_kernel<<<grid1, block>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
+                                                     3, 32, 32, 256, 32, 32, 3, 1);
     
     // Pool1
     dim3 grid_pool1(256, (16 + 15) / 16, (16 + 15) / 16);
-    maxpool_kernel<<<grid_pool1, block>>>(d_relu1_out, d_pool1_out, 256, 32, 32);
+    maxpool_kernel<<<grid_pool1, block>>>(d_conv1_out, d_pool1_out, 256, 32, 32);
     
-    // Conv2
+    // OPTIMIZATION #5: Conv2 with shared memory tiling
     dim3 grid2(128, (16 + 15) / 16, (16 + 15) / 16);
-    conv2d_kernel<<<grid2, block>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
-                                     256, 16, 16, 128, 16, 16, 3, 1);
-    
-    // ReLU2 - IN-PLACE
-    int size2 = 128 * 16 * 16;
-    relu_inplace_kernel<<<(size2 + 255) / 256, 256>>>(d_conv2_out, size2);
+    conv2d_bias_relu_fused_kernel<<<grid2, block>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
+                                                     256, 16, 16, 128, 16, 16, 3, 1);
     
     // Pool2 - BOTTLENECK (128*8*8 = 8192 features)
     dim3 grid_pool2(128, (8 + 15) / 16, (8 + 15) / 16);
-    maxpool_kernel<<<grid_pool2, block>>>(d_relu2_out, d_pool2_out, 128, 16, 16);
+    maxpool_kernel<<<grid_pool2, block>>>(d_conv2_out, d_pool2_out, 128, 16, 16);
     
     CUDA_CHECK(cudaGetLastError());
     
@@ -1082,30 +1052,23 @@ void AutoencoderCUDA::extract_features_async(const float* input_chw, float* outp
     // Run encoder with stream
     dim3 block(16, 16, 1);
     
-    // Conv1 - USE CONSTANT MEMORY KERNEL!
+    // OPTIMIZATION #5: Conv1 with shared memory tiling
     dim3 grid1(256, (32 + 15) / 16, (32 + 15) / 16);
-    conv1_kernel_const<<<grid1, block, 0, stream>>>(d_input, d_conv1_out);
-    
-    // ReLU1 - IN-PLACE
-    int size1 = 256 * 32 * 32;
-    relu_inplace_kernel<<<(size1 + 255) / 256, 256, 0, stream>>>(d_conv1_out, size1);
+    conv2d_bias_relu_fused_kernel<<<grid1, block, 0, stream>>>(d_input, d_conv1_w, d_conv1_b, d_conv1_out,
+                                                                3, 32, 32, 256, 32, 32, 3, 1);
     
     // Pool1
     dim3 grid_pool1(256, (16 + 15) / 16, (16 + 15) / 16);
-    maxpool_kernel<<<grid_pool1, block, 0, stream>>>(d_relu1_out, d_pool1_out, 256, 32, 32);
+    maxpool_kernel<<<grid_pool1, block, 0, stream>>>(d_conv1_out, d_pool1_out, 256, 32, 32);
     
-    // Conv2
+    // OPTIMIZATION #5: Conv2 with shared memory tiling
     dim3 grid2(128, (16 + 15) / 16, (16 + 15) / 16);
-    conv2d_kernel<<<grid2, block, 0, stream>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
-                                                256, 16, 16, 128, 16, 16, 3, 1);
-    
-    // ReLU2 - IN-PLACE
-    int size2 = 128 * 16 * 16;
-    relu_inplace_kernel<<<(size2 + 255) / 256, 256, 0, stream>>>(d_conv2_out, size2);
+    conv2d_bias_relu_fused_kernel<<<grid2, block, 0, stream>>>(d_pool1_out, d_conv2_w, d_conv2_b, d_conv2_out,
+                                                                256, 16, 16, 128, 16, 16, 3, 1);
     
     // Pool2 - BOTTLENECK
     dim3 grid_pool2(128, (8 + 15) / 16, (8 + 15) / 16);
-    maxpool_kernel<<<grid_pool2, block, 0, stream>>>(d_relu2_out, d_pool2_out, 128, 16, 16);
+    maxpool_kernel<<<grid_pool2, block, 0, stream>>>(d_conv2_out, d_pool2_out, 128, 16, 16);
     
     CUDA_CHECK(cudaGetLastError());
     

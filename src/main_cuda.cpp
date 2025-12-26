@@ -8,8 +8,24 @@
 #include "autoencoder_cuda.h"
 
 int main(int argc, char** argv) {
+    // Auto-detect version from executable name
+    std::string exec_name = argv[0];
+    std::string version = "UNKNOWN";
+    std::string default_weights = "autoencoder_cuda_weights.bin";
+    
+    if (exec_name.find("basic") != std::string::npos) {
+        version = "BASIC";
+        default_weights = "autoencoder_cuda_basic_weights.bin";
+    } else if (exec_name.find("opt_v2") != std::string::npos) {
+        version = "OPTIMIZED V2 (Kernel Fusion Optimizations)";
+        default_weights = "autoencoder_cuda_opt_v2_weights.bin";
+    } else if (exec_name.find("opt_v1") != std::string::npos) {
+        version = "OPTIMIZED V1 (Memory Optimizations)";
+        default_weights = "autoencoder_cuda_opt_v1_weights.bin";
+    }
+    
     std::string cifar_dir = "../cifar-10-binary/cifar-10-batches-bin";
-    std::string model_path = "autoencoder_cuda_opt_v1_weights.bin";
+    std::string model_path = default_weights;
     int epochs = 1;
     int batch_size = 64;       // TRUE BATCH SIZE - processes 64 images simultaneously on GPU
     float learning_rate = 0.001f;
@@ -22,7 +38,7 @@ int main(int argc, char** argv) {
     if (argc > 5) learning_rate = std::stof(argv[5]);
     if (argc > 6) max_train_images = std::stoi(argv[6]);
 
-    std::cout << "=== CUDA OPTIMIZED V1 - TRUE BATCH PROCESSING ===\n";
+    std::cout << "=== CUDA " << version << " BATCH PROCESSING ===\n";
     std::cout << "CIFAR dir: " << cifar_dir << "\n";
     std::cout << "Weights:   " << model_path << "\n";
     std::cout << "Epochs:    " << epochs << "\n";

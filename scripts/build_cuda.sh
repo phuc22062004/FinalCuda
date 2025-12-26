@@ -60,8 +60,8 @@ nvcc ${ARCH_FLAG} -std=c++17 -O2 \
     main_cuda_opt_v1.o autoencoder_opt_v1.o \
     -o autoencoder_cuda_opt_v1
 
-# === Build optimized version 2 (Speed Optimized) ===
-echo "Building opt_v2 (Speed Optimized)..."
+# === Build optimized version 2 (Kernel Optimized) ===
+echo "Building opt_v2 (Kernel Optimized)..."
 nvcc ${ARCH_FLAG} -std=c++17 -O3 -use_fast_math -c \
     "${PROJECT_ROOT}/src/cuda/autoencoder_opt_v2.cu" \
     -I"${PROJECT_ROOT}/include" \
